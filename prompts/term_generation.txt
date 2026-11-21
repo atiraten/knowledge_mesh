@@ -11,8 +11,8 @@ The output should be in {language_name} language.
 {class_words_section}
 4. ***A word in Business Term shall appear only Once ***
 5. **Expand Acronyms:** The business term must must have expanded acronyms unless overriden by the ABBREVIATION DICTIONARY.
-6. **For each column in a table, generate the business term description, any optional explanantion comment in this EXACT format in ** {language_name} ** only:
-<table name>,<column name>,<business term>,<detailed business description>,<comments>
+6. **For each column in a table, generate the business term, its sensitive flag, the description, any optional explanantion comment in this EXACT format in ** {language_name} ** only:
+<table name>,<column name>,<business term>,<sensitive>,<detailed business description>,<comments>
 7. Use ABBREVIATION DICTIONARY to expand acronyms when the term is found in local context.
 8. Decoded segment word must have all the letters of the segment unless decoded from the ABBREVIATION DICTIONARY
 9. **Generate output for every column**
@@ -20,6 +20,9 @@ The output should be in {language_name} language.
 11. If the column has words, keep every word.
     Example: column='ln_as_of_dt' --> 'loan as of date'. loan date is INCORRECT.
     Example: column='adr_ln1' --> 'Address Line 1'. Address Line is INCORRECT. 
+12. **Sensitive Flag:** <sensitive> is Y when the business term can identify a physical person, on its own or when combined with other information; otherwise N.
+    Personal data (PII / PHI / GDPR) includes, and is not limited to: First Name, Last Name, Full Name, Address, City, Zip Code, Email, Phone Number, Date Of Birth, Place Of Birth, Date Of Marriage, Date Of Death, Social Security Number, Tax Identifier Number, National Identifier Number, Medicare Number, Medicaid Number, Medical Record Number, and any other information capable of identifying a person.
+    Information that identifies only a company (not a person) is N.
 
 ### THE ENTITY-PREFIX RULE
 For every column, decide whether the table is a Domain Entity or a Cross-Reference Record:
@@ -53,19 +56,19 @@ For every column, decide whether the table is a Domain Entity or a Cross-Referen
   Example: Table=cust, column=fstnm -> Business Term = `Customer First Name`. The comment shall be: cust=customer fst=first nm=name
 
 ### EXACT TARGET PATTERN (GENERIC ALIGNMENT)
-Client,lastnm,Client Last Name,The legal family name of the client record, Client=client | last=last | nm=name .
-Employee,dob,Employee Date Of Birth,The calendar date of birth for the employee record, Employee=Employee | dob=Date Of Birth .
-Invoice,id,Invoice Identifier,The unique record sequence tracking the invoice instance, Invoice=Invoice | id=identifier .
-Invoice,ssn,Social Security Number,The social security number associated with the transaction account.,Dropped prefix per transaction rule, ssn=social security number .
-Customer,celphnnum,Customer Cell Phone Number,The cell phone number on file for the customer, customer=customer | cel=Cell | phn=Phone | num=Number .
-Customer,wrkphnnum,Customer Work Phone Number,The work phone number for the customer,customer=customer | wrk=Work | phn=Phone | num=Number — do not drop any segment.
+Client,lastnm,Client Last Name,Y,The legal family name of the client record, Client=client | last=last | nm=name .
+Employee,dob,Employee Date Of Birth,Y,The calendar date of birth for the employee record, Employee=Employee | dob=Date Of Birth .
+Invoice,id,Invoice Identifier,N,The unique record sequence tracking the invoice instance, Invoice=Invoice | id=identifier .
+Invoice,ssn,Social Security Number,Y,The social security number associated with the transaction account.,Dropped prefix per transaction rule, ssn=social security number .
+Customer,celphnnum,Customer Cell Phone Number,Y,The cell phone number on file for the customer, customer=customer | cel=Cell | phn=Phone | num=Number .
+Customer,wrkphnnum,Customer Work Phone Number,Y,The work phone number for the customer,customer=customer | wrk=Work | phn=Phone | num=Number — do not drop any segment.
 
 ### RAW CSV OUTPUT IN ** {language_name} ** ONLY
 Generate output ONLY for the columns listed under "COLUMNS TO GENERATE BUSINESS TERMS FOR" above.
 The comment should contain the decoded segments. 
 ***Do NOT output rows for columns listed in the TABLE CONTEXT section.***
-**COMMA Separator between table <table name>,<column name>,<business term>,<detailed business description> and <comments> is a MUST **.
-<table name>,<column name>,<business term>,<detailed business description>,<comments>
+**COMMA Separator between table <table name>,<column name>,<business term>,<sensitive>,<detailed business description> and <comments> is a MUST **.
+<table name>,<column name>,<business term>,<sensitive>,<detailed business description>,<comments>
 
 ### COLUMNS TO GENERATE BUSINESS TERMS FOR
 Table: {table}

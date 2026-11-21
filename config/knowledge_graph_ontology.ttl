@@ -1,0 +1,86 @@
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix mesh:    <urn:mesh:ontology:> .
+
+# Knowledge Mesh vocabulary. Published as the named graph urn:mesh:context:ontology:core.
+# Instance data lives in per-source layer graphs: urn:mesh:context:source:<id>:physical|semantic|mapping.
+
+<urn:mesh:ontology> a owl:Ontology ;
+    rdfs:label "Knowledge Mesh ontology" ;
+    rdfs:comment "Business semantics (entities, terms, relationships), physical metadata (tables, columns, keys) and the mappings between them, with status, confidence and provenance." .
+
+<urn:mesh:scheme:glossary> a skos:ConceptScheme ;
+    skos:prefLabel "Business glossary" ;
+    rdfs:comment "Every business term is a skos:Concept in this scheme." .
+
+# -- semantic layer ---------------------------------------------------------------------------
+mesh:BusinessEntity a owl:Class ;
+    rdfs:label "Business entity" ;
+    rdfs:comment "A business entity type (Customer, Order). Each entity is also declared as an owl:Class of its own." .
+
+mesh:BusinessTerm a owl:Class ;
+    rdfs:label "Business term" ;
+    rdfs:comment "A governed glossary term; also a skos:Concept. Its attribute meaning is the separate owl:DatatypeProperty linked by mesh:termProperty." .
+
+mesh:Relationship a owl:Class ;
+    rdfs:label "Relationship" ;
+    rdfs:comment "A reified, directional relationship between two business entities (from documents, from catalog FKs, or proposed by the relationship stage)." .
+
+mesh:SemanticRelationship a owl:Class ;
+    rdfs:subClassOf mesh:Relationship ;
+    rdfs:label "Semantic relationship" ;
+    rdfs:comment "A named business relationship (Customer placesOrder Order) with definition, synonyms, cardinality, status and provenance. Describes how data can be joined, never a record-level fact." .
+
+mesh:TermRelation a owl:Class ;
+    rdfs:label "Term relation" ;
+    rdfs:comment "A descriptive relation between two business terms (expectedAfter, derivedFrom, equivalentTo, dependsOn, isPartOf). Not validated against records; executable validation requires a configured rule engine." .
+
+mesh:BusinessDefinition a owl:Class ; rdfs:label "Business definition" .
+
+# -- physical layer ---------------------------------------------------------------------------
+mesh:Dataset a owl:Class ; rdfs:label "Table / dataset" .
+mesh:Column a owl:Class ; rdfs:label "Column" .
+mesh:KeyConstraint a owl:Class ; rdfs:label "Key constraint" .
+mesh:PrimaryKey a owl:Class ; rdfs:subClassOf mesh:KeyConstraint ; rdfs:label "Primary key" .
+mesh:UniqueKey a owl:Class ; rdfs:subClassOf mesh:KeyConstraint ; rdfs:label "Unique key" .
+mesh:ForeignKey a owl:Class ; rdfs:subClassOf mesh:KeyConstraint ; rdfs:label "Foreign key" ;
+    rdfs:comment "Ordered column pairs (mesh:columnMapping with mesh:position) keep composite keys pairwise." .
+mesh:KeyColumn a owl:Class ; rdfs:label "Key member column" .
+mesh:ColumnMapping a owl:Class ; rdfs:label "Foreign-key column pair" .
+mesh:ProfilingRun a owl:Class ; rdfs:label "Profiling run" .
+
+# -- mapping layer ----------------------------------------------------------------------------
+mesh:EntityMapping a owl:Class ; rdfs:label "Table to entity mapping" .
+mesh:TermBinding a owl:Class ; rdfs:label "Column to term mapping" .
+mesh:JoinMapping a owl:Class ; rdfs:label "Relationship to join mapping" ;
+    rdfs:comment "Links a relationship to a foreign key implementing it: explicit (the FK the relationship was proposed for) or automatic (another FK between the two entities' tables)." .
+mesh:NavigationalEdge a owl:Class ; rdfs:subClassOf mesh:Relationship ; rdfs:label "Navigational edge" ;
+    rdfs:comment "Schema-level edge derived from a foreign key. Traversable, but carries no business semantics." .
+
+# -- properties -------------------------------------------------------------------------------
+mesh:termOfEntity a owl:ObjectProperty ; rdfs:label "term of entity" ; rdfs:domain mesh:BusinessTerm ; rdfs:range mesh:BusinessEntity .
+mesh:termProperty a owl:ObjectProperty ; rdfs:label "term property" ; rdfs:comment "SKOS term -> its OWL datatype property." .
+mesh:sourceEntity a owl:ObjectProperty ; rdfs:label "source entity" ; rdfs:domain mesh:Relationship .
+mesh:targetEntity a owl:ObjectProperty ; rdfs:label "target entity" ; rdfs:domain mesh:Relationship .
+mesh:objectProperty a owl:ObjectProperty ; rdfs:label "object property" ; rdfs:comment "Relationship record -> its OWL object property." .
+mesh:hasColumn a owl:ObjectProperty ; rdfs:label "has column" ; rdfs:domain mesh:Dataset ; rdfs:range mesh:Column .
+mesh:inDataset a owl:ObjectProperty ; rdfs:label "in dataset" ; owl:inverseOf mesh:hasColumn .
+mesh:representsEntity a owl:ObjectProperty ; rdfs:label "represents entity" .
+mesh:boundToColumn a owl:ObjectProperty ; rdfs:label "bound to column" .
+mesh:hasBusinessTerm a owl:ObjectProperty ; rdfs:label "has business term" .
+mesh:validationStatus a owl:DatatypeProperty ; rdfs:label "validation status" ; rdfs:comment "verified | inferred | rejected" .
+mesh:confidence a owl:DatatypeProperty ; rdfs:label "confidence" .
+mesh:mappingMethod a owl:DatatypeProperty ; rdfs:label "mapping method" ; rdfs:comment "explicit | automatic" .
+mesh:keyDirection a owl:DatatypeProperty ; rdfs:label "key direction" ; rdfs:comment "forward: the relationship's source entity is the FK's referencing table; reverse otherwise." .
+
+# -- term predicates (descriptive) --------------------------------------------------------------
+mesh:expectedAfter a owl:ObjectProperty ; rdfs:label "expected after" ; rdfs:domain skos:Concept ; rdfs:range skos:Concept ;
+    rdfs:comment "The subject term's value is expected to follow the object term's value (e.g. Settlement Date after Transaction Date)." .
+mesh:derivedFrom a owl:ObjectProperty ; rdfs:label "derived from" ; rdfs:domain skos:Concept ; rdfs:range skos:Concept .
+mesh:equivalentTo a owl:ObjectProperty ; rdfs:label "equivalent to" ; rdfs:domain skos:Concept ; rdfs:range skos:Concept .
+mesh:dependsOn a owl:ObjectProperty ; rdfs:label "depends on" ; rdfs:domain skos:Concept ; rdfs:range skos:Concept .
+mesh:isPartOf a owl:ObjectProperty ; rdfs:label "is part of" ; rdfs:domain skos:Concept ; rdfs:range skos:Concept .

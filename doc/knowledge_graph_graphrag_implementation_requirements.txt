@@ -1,0 +1,352 @@
+KNOWLEDGE GRAPH + GRAPHRAG + MCP RETRIEVAL
+IMPLEMENTATION REQUIREMENTS
+Version: 1.0
+Date: 2026-11-20
+Status: Requirements specification (not implemented)
+
+1. PURPOSE AND SCOPE
+
+1.1 The system SHALL use an RDF-based knowledge graph to represent business concepts and their mapping to structured data, and SHALL support graph-aware retrieval for user questions.
+
+1.2 The knowledge graph SHALL support:
+  - Business Entities such as Customer, Order, Order Line, and Product.
+  - Business Terms such as Customer Identifier, Transaction Date, and Settlement Date.
+  - Relationships between Business Entities, including multi-hop paths through bridge entities.
+  - Relationships between Business Terms (e.g., Settlement Date is expected to follow Transaction Date).
+  - Physical metadata (tables, columns, primary keys, foreign keys, including composite keys).
+  - Semantic-to-physical mappings, definitions, synonyms, confidence, provenance, and validation status.
+  - Links to relevant document evidence, when available.
+
+1.3 The solution SHALL use RDFLib 7.6.0 for RDF graph representation and retrieval. RDF, RDFS, OWL, SKOS, and SHACL MAY be used as appropriate to encode semantics, glossary concepts, and validation rules. SHACL execution, if required, SHALL use a compatible validation implementation (e.g., pySHACL); RDFLib alone SHALL NOT be assumed to execute SHACL.
+
+1.4 The MCP server SHALL publish the tools specified in Section 3 for knowledge graph retrieval, document retrieval, SQL execution, and HTML generation.
+
+1.5 The system SHALL use the existing planner and agent harness architecture. The planner returns structured intents and retrieval queries. New tools SHALL integrate through the existing MCP publication and tool-dispatch extension points. The harness SHALL support the clarification flow defined in Section 5.10.
+
+1.6 This specification covers graph and document retrieval, database record retrieval, HTML output, and catalog navigation. It SHALL NOT require loading or copying all underlying customer/order/product records into the RDF graph, nor replacing the existing SQL executor, vector store, document ingestion pipeline, or agent loop.
+
+1.7 Existing catalog behavior. The system scans the databases specified in application settings and catalogs their metadata.
+
+2. RDF KNOWLEDGE GRAPH MODEL
+
+2.1 The graph SHALL differentiate business semantics from physical metadata and their mappings. Logical named graphs SHOULD include:
+  a. semantic: Business Entities, Business Terms, and relationships.
+  b. physical: Tables, columns, keys, and FK column mappings.
+  c. mapping: Semantic-to-physical correspondences and relationship-to-join mappings.
+  d. documents: Document/chunk references and semantic links, if documents are indexed.
+  e. constraints: SHACL shapes and/or business rule references.
+
+2.2 A Business Entity SHALL have a stable unique IRI, name, definition (when known), alternative names (when known), and classification. An OWL class is the preferred conceptual representation for an entity type.
+
+2.3 A Business Term SHALL have a stable unique IRI, preferred name, definition (when known), alternate labels/synonyms, and a link to its owning Business Entity. A SKOS concept SHALL represent the governed term. When the term denotes a semantic attribute, it SHOULD also be associated with a separate OWL datatype/object property as appropriate. The SKOS term and OWL property SHALL NOT be conflated.
+
+2.4 Business Entity relationships SHALL be named, directional semantic relationships, such as Customer --placesOrder--> Order, Order --containsOrderLine--> OrderLine, and OrderLine --referencesProduct--> Product. They SHALL have source and target entities and MAY include cardinality, business conditions, validity, confidence, and provenance.
+
+2.5 Entity relationships SHALL also be first-class metadata objects, to support mappings to one or more physical FK/join definitions. An OWL object property MAY describe the semantic predicate. Schema-level navigational edges MAY be materialized for efficient graph traversal, but SHALL be distinguished from record-level factual assertions.
+
+2.6 Physical tables SHALL include table IRI, name, source/system identification where available, and membership relationships to their columns.
+
+2.7 Physical columns SHALL include column IRI, name, owning table, and data type when known. In the existing catalog, each physical table SHALL be linked to one or more Business Entities, and each physical column SHALL be linked to one or more Business Terms in the glossary. Multiple physical tables MAY link to the same Business Entity, and multiple physical columns MAY link to the same Business Term. Such mappings SHALL support confidence and provenance.
+
+2.8 Primary keys, foreign keys, and unique keys SHALL be modeled as explicit resources. Foreign keys SHALL contain ordered pairs of source and target columns so that composite-key joins are correctly represented. Joins SHALL not be inferred by column-name similarity alone.
+
+2.9 The graph SHALL support semantic relationships between Business Terms such as expectedAfter, derivedFrom, equivalentTo, dependsOn, and isPartOf, where these meanings have been explicitly defined. Descriptive term-to-term relations SHALL NOT automatically be interpreted as validated record-level facts.
+
+2.10 Validation constraints MAY be represented using SHACL, including date comparison rules or required attributes. Rule exceptions and applicable entity scope SHALL be represented when known.
+
+2.11 The graph SHOULD record source/provenance, confidence, status (inferred/verified/rejected), and timestamps for automatically discovered relationships. Unverified inferred FK relationships SHALL NOT be silently presented as authoritative business semantics.
+
+2.12 Document chunks MAY be connected to the Business Entities, Business Terms, and relationships they describe. Embeddings and full document content MAY remain in the existing document/vector systems; the graph SHOULD store stable identifiers/references instead of duplicating vectors and content.
+
+3. MCP SERVER REQUIREMENTS
+
+3.1 The MCP server SHALL publish the following tools.
+  - NEW tool: query_knowledge_graph.
+  - EXISTING tool: retrieve_documents (document retrieval; preserve implementation, interface, and behavior unless separately approved).
+  - NEW tool: execute_sql for authorized database queries.
+  - NEW tool: generate_html for web page content.
+
+3.2 The new tool name SHALL be "query_knowledge_graph" for this implementation. Its public schema SHALL be explicit and documented. It SHALL return structured, machine-readable results suitable for use by the existing executor LLM.
+
+3.3 The query_knowledge_graph tool SHALL accept retrieval queries derived from a planner intent. A recommended request schema is:
+
+  {
+    "intent_id": "I1",
+    "intent": "list customer born before 1990",
+    "retrieval_queries": [
+      "customer born before 1990",
+      "customers birth date before 1990"
+    ],
+    "max_hops": 5,
+    "top_k": 5,
+    "include_physical_mappings": true,
+    "include_related_terms": true
+  }
+
+  - intent_id: optional correlation identifier if omitted by older clients.
+  - intent: natural-language business objective.
+  - retrieval_queries: list of alternative search formulations from the planner; SHOULD be nonempty.
+  - max_hops: maximum semantic-relationship traversals (configured default: 5).
+  - top_k: maximum ranked retrieval hits/paths (configured default: 5).
+  - include_physical_mappings / include_related_terms: optional retrieval flags.
+
+3.4 The tool SHALL resolve text to candidate Business Entities, Business Terms, synonyms, and relevant named relationships. It SHOULD use deterministic exact/alias matching first, and MAY use lexical/semantic retrieval to resolve ambiguous phrases. Matching SHALL not assume that every token in a query corresponds to an ontology IRI.
+
+3.5 For each retrieval query, the tool SHALL retrieve relevant entities, terms, and connecting semantic relationships. It SHALL merge/deduplicate overlapping results across retrieval_queries within the same intent while preserving which query matched each result.
+
+3.6 The tool SHALL support multi-hop traversal through intermediate/bridge entities (e.g., Customer -> Order -> OrderLine -> Product). It SHALL return intermediate entity and relationship identifiers, not merely a boolean stating that two concepts are connected.
+
+3.7 Multi-hop traversal SHALL be bounded by max_hops and configured resource limits, SHALL avoid cycles within an individual candidate path, and SHOULD support directed traversal by default. Reverse traversal MAY be supported only with clear reverse-relationship semantics.
+
+3.8 The tool SHALL rank candidate paths using semantic relevance to the intent, relationship meaning, verified join-mapping coverage, and path length. A shorter path SHALL NOT outrank a semantically correct longer path solely because of fewer hops. Relevance scores SHALL not be labeled as calibrated probabilities unless calibration has been performed.
+
+3.9 The tool SHALL expand selected semantic paths with relevant Business Terms, definitions, aliases, associated tables/columns, composite FK column pairs, join predicates, and applicable business constraints. This expansion SHOULD be configurable to control response size.
+
+3.10 The tool SHALL distinguish between:
+  - semantic/model-level connectivity (which describes how data could be joined); and
+  - record-level facts (which require actual data retrieval or explicit instance triples).
+  The tool SHALL NOT assert that a named customer purchased a named product based only on schema-level paths.
+
+3.11 The tool SHALL produce explicit uncertainty when an entity, term, relationship, FK mapping, or complete path cannot be resolved or verified. It SHALL NOT invent table names, columns, joins, or relationships.
+
+3.12 Recommended response schema (illustrative, not a claim that these resources already exist):
+
+  {
+    "intent_id": "I1",
+    "status": "ok",
+    "matched_queries": ["customer born before 1990"],
+    "business_entities": [
+      {"iri": "https://example.com/kg/Customer", "name": "Customer", "definition": "..."}
+    ],
+    "business_terms": [
+      {"iri": "https://example.com/kg/term_birth_date", "name": "Birth Date", "entity_iri": "https://example.com/kg/Customer", "definition": "..."}
+    ],
+    "paths": [],
+    "physical_mappings": {
+      "tables": [],
+      "columns": [],
+      "joins": []
+    },
+    "constraints": [],
+    "evidence": [],
+    "warnings": []
+  }
+
+  When paths are found, each path SHALL identify ordered node IRIs, semantic predicate IRIs/names, source-to-target direction, mapping references, validation status, and an explainable relevance score.
+
+3.13 An empty result SHALL use an explicit status (e.g., "no_match") and empty result arrays, rather than fabricated fallback metadata. Errors SHALL use a separate explicit status (e.g., "error") with a safe diagnostic message.
+
+3.14 The tool SHOULD expose relevant result provenance (graph name/source, discovered vs. verified) and stable identifiers that the executor can reference in later actions.
+
+3.15 Security: the graph tool SHALL enforce the application existing authorization model, including access restrictions on source metadata and any document evidence. The MCP tool SHALL NOT bypass row/column or metadata access controls. If raw SPARQL is supported as a separate administrative capability, it SHALL be read-only, access-controlled, and protected by query limits; user-originated strings SHALL NOT be interpolated unsafely into SPARQL.
+
+3.16 The existing retrieve_documents tool SHALL remain the mechanism for document retrieval. The graph tool MAY return document references, but SHALL NOT replace retrieve_documents or cause a second, incompatible document retrieval implementation.
+
+3.17 The execute_sql tool SHALL accept a catalogued database identifier and a read-only SQL query. It SHALL enforce the requesting user's database and data access permissions, execute the query using the configured connection, and return structured results containing a status, column metadata, and rows on success. A successful query with zero rows SHALL return an empty row list. Execution failures SHALL return a distinct error status and a safe diagnostic message. The MCP tool SHALL use the existing SQL execution mechanism where available.
+
+3.18 The generate_html tool SHALL accept authorized content, including query results when applicable, and return an HTML fragment for display on the web page. The web application SHALL render the fragment when HTML output is requested. Input values SHALL be treated as content and escaped as needed. The application SHALL sanitize returned markup before rendering it.
+
+3.19 The execute_sql and generate_html tools SHALL publish documented input and output schemas.
+
+4. LLM PLANNER REQUIREMENTS
+
+4.1 The harness SHALL receive the original user query and call its existing planner LLM integration to produce a structured plan before execution, following the current architecture.
+
+4.2 The planner SHALL determine whether the user query needs decomposition into multiple intents. A query with one clear objective SHALL normally produce one intent and decompose=false. Multi-objective queries MAY produce multiple intents and decompose=true.
+
+4.3 The planner SHALL output a list of intents. Each intent SHALL have a nonempty list of retrieval_queries, representing alternate, search-oriented formulations of that intent. Retrieval queries SHOULD be suitable for searching either the knowledge graph or documents and SHALL preserve important constraints from the original intent.
+
+4.4 The planner output SHALL preserve the following JSON structure and field names:
+
+  {
+    "original_query": "list customer born before 1990",
+    "decompose": false,
+    "intents": [
+      {
+        "id": "I1",
+        "intent": "list customer born before 1990",
+        "retrieval_queries": [
+          "customer born before 1990",
+          "customers birth date before 1990"
+        ],
+        "depends_on": []
+      }
+    ],
+    "reasoning": "The query has a single clear objective to find customers born before 1990 and does not require decomposition.",
+    "execution": "single"
+  }
+
+4.5 Field requirements:
+  - original_query: exact incoming user question or faithfully preserved original text.
+  - decompose: boolean indicating whether multiple intents are required.
+  - intents: nonempty ordered list of intent objects.
+  - intents[].id: unique identifier within the plan (e.g., I1, I2).
+  - intents[].intent: natural-language objective for one intent.
+  - intents[].retrieval_queries: nonempty array of alternative retrieval strings.
+  - intents[].depends_on: array of intent IDs that must complete first, or [].
+  - reasoning: concise high-level decomposition rationale; SHALL NOT require hidden chain-of-thought.
+  - execution: "single" for one independent intent, or an existing supported multi-intent execution mode. Any additional values SHALL match the harness CURRENT accepted enum; do not invent new modes.
+
+4.6 Dependencies SHALL reference valid intent IDs, SHALL not include self-dependencies, and SHALL not form cycles. If multiple intents are independent, they MAY be executed according to existing harness behavior. New scheduling semantics SHALL NOT be introduced as part of this work.
+
+4.7 The planner SHALL preserve query filters, comparators, temporal constraints, negations, requested entities, and output requirements. For example, "born before 1990" SHALL not be reduced to an unconstrained "customer birth date" retrieval query only.
+
+4.8 The planner SHALL NOT embed SQL, guess joins, or assume physical tables/columns without retrieved evidence. Its function is to produce intents and retrieval formulations, not to perform knowledge-graph traversal or physical query planning.
+
+4.9 The planner output SHALL be validated against the existing schema (or equivalent validation added at the planner boundary only). Invalid outputs SHALL follow the existing error/retry/fallback policy; this project SHALL NOT redesign the harness loop.
+
+5. HARNESS / EXECUTOR REQUIREMENTS
+
+5.1 The harness SHALL retain its existing agent loop, tool-calling cycle, termination checks, retry logic, and replanning behavior. It SHALL handle human clarification at the response boundary. This specification SHALL NOT introduce a replacement nested loop over intents, a separate executor loop, or an alternative workflow engine.
+
+5.2 The implementation SHALL integrate by:
+  a. Preserving the existing planner call and output envelope.
+  b. Making retrieval_queries available to the existing executor/tool-selection context through existing supported interfaces.
+  c. Registering query_knowledge_graph, execute_sql, and generate_html on the MCP server so the current executor can discover and invoke them.
+  d. Returning graph context in a tool result consumable by the existing executor.
+
+5.3 The executor SHALL determine whether the intent requires semantic or schema metadata, structured records, unstructured documents, or a combination. It SHALL select MCP tools based on the information and output required by the intent.
+  - query_knowledge_graph: business entities, business terms, entity paths, relationships, physical table/column mappings and joins.
+  - retrieve_documents: unstructured documents and document chunks.
+  - execute_sql: records from the selected database.
+  - generate_html: HTML content for web display.
+
+5.4 The MCP tool descriptions SHALL state the input, purpose, and output of each tool. The executor MAY call multiple tools when the intent requires more than one source of evidence or output format.
+
+5.5 No hardcoded unconditional per-intent retrieval loop SHALL be added outside the existing loop. The executor SHALL remain responsible for deciding which tool(s) to call and with what arguments under the current tool-calling protocol.
+
+5.6 The executor SHALL receive the relevant intent text and retrieval_queries in its existing context and SHOULD pass them to query_knowledge_graph when calling it. It SHALL be allowed to use multiple retrieval_queries for recall, with graph-side deduplication.
+
+5.7 When an intent requires retrieving database records, the Executor LLM SHALL invoke an LLM to generate a read-only SQL query for the target database dialect. The SQL generation call SHALL use the resolved intent and the available catalog and knowledge graph evidence for tables, columns, joins, and filters.
+
+5.8 The existing replanning process, if any, SHALL remain unchanged. The new graph tool SHALL provide structured no-match/ambiguity feedback that the current harness can use according to its existing decision rules; it SHALL NOT force replanning or directly invoke the planner.
+
+5.9 The executor SHALL submit the generated query and the target database identifier to execute_sql. It SHALL use the returned rows as evidence for record-level answers and invoke generate_html with the relevant authorized content when the response requires HTML for web display.
+
+5.10 When the executor reports that it is unsure how to proceed or cannot answer with confidence, or when the final result would be "No information found", the harness SHALL ask the user for the specific additional information needed before finalizing the response. The harness SHALL retain the original request and relevant context while waiting for the reply and continue processing the request with the clarification once it arrives.
+
+6. KNOWLEDGE GRAPH RETRIEVAL BEHAVIOR
+
+6.1 Entity and term retrieval SHALL support direct lookup by stable IRI, exact label, alternate label, case-insensitive normalized label, and relevant contextual matching. Additional semantic/embedding retrieval MAY be used for approximate matching.
+
+6.2 For a query such as "list customer born before 1990", the graph tool SHOULD identify Customer and a Birth Date term/property, resolve any physical table/column mappings, and provide the condition meaning and type metadata if available. The graph tool SHALL NOT return actual customer rows solely from semantic metadata.
+
+6.3 For a query such as "customer bought a product", graph retrieval SHALL discover a semantically valid multi-hop path such as Customer -> Order -> OrderLine -> Product when supported by the graph. The result SHOULD identify each relationship and any verified join mapping along that path.
+
+6.4 If multiple routes exist (e.g., via Review, SupportTicket, Return, Order), the retriever SHALL rank for the meaning of "bought" or "purchased" rather than selecting the shortest path blindly. Paths requiring unverified relationship semantics SHOULD carry warnings or lower confidence.
+
+6.5 The retriever SHALL support a configurable maximum hop count, top-k results, maximum candidate expansions, timeout, and total output size. Defaults SHOULD be documented in existing configuration conventions; no particular new config file is mandated.
+
+6.6 Standard SPARQL 1.1 property-path queries MAY establish reachability, but the retriever SHALL return actual intermediate nodes and predicates. Bounded traversal MAY be implemented with BFS/DFS over a semantic adjacency index or explicit bounded SPARQL query patterns. It SHALL NOT rely on unsupported SPARQL 1.1 bounded path syntax such as predicate{1,5}.
+
+6.7 Duplicate entities, terms, paths, and mappings SHALL be deduplicated by stable identifiers. Different physical implementations of the same semantic relationship SHOULD remain distinguishable.
+
+6.8 Graph retrieval SHOULD prefer validated relationships and declared keys. Inferred keys and mappings SHALL retain their confidence and provenance; their validation status SHALL be included in results.
+
+6.9 A complete semantic path SHALL not be claimed executable for SQL generation if a required physical mapping or join pair is missing. The tool SHALL return partial context and clearly identify the missing mapping instead.
+
+7. CONFIGURATION, OPERATIONS, AND OBSERVABILITY
+
+7.1 The implementation SHALL use existing project configuration conventions. Recommended configurable values:
+  - knowledge_graph.enabled
+  - knowledge_graph.storage_backend / dataset_location
+  - knowledge_graph.default_max_hops (default 5)
+  - knowledge_graph.default_top_k (default 5)
+  - knowledge_graph.max_candidate_paths
+  - knowledge_graph.query_timeout_seconds
+  - knowledge_graph.max_response_chars or token budget
+  - knowledge_graph.include_inferred_relationships
+  - knowledge_graph.embedding_retrieval_enabled (optional)
+
+7.2 Existing retrieve_documents configuration SHALL remain intact.
+
+7.3 MCP tool invocations SHOULD produce traceable logs/telemetry for intent_id, tool name, lookup types, query count, graph version, matched entity/term counts, paths considered/returned, hop count, duration, status, and warnings. Logging SHALL avoid exposing restricted values or unnecessary sensitive user text.
+
+7.4 The system SHOULD support loading/reloading validated RDF datasets and SHOULD report ontology/metadata indexing failures without corrupting the prior usable graph.
+
+7.5 Results SHOULD include stable IRIs, relationship IDs, source identifiers, and graph version/timestamp to aid reproducibility and debugging.
+
+7.6 The system SHALL provision the RDF knowledge graph with references to the catalogued Business Terms, Business Entities, physical tables, physical columns, and keys, including primary, foreign, unique, and composite keys. The graph SHALL preserve the catalog's table-to-entity and column-to-term links.
+
+8. ACCEPTANCE TESTS
+
+AT-01 MCP publication. Verify that query_knowledge_graph, execute_sql, and generate_html are discoverable with valid, documented schemas. Verify that retrieve_documents is discoverable and operates as before.
+
+AT-02 Planner single intent: For "list customer born before 1990", the planner emits the exact required field structure, decompose=false, one intent, nonempty retrieval_queries, depends_on=[], execution="single".
+
+AT-03 Planner multiple intents: A genuinely multi-objective question yields multiple unique intent IDs with valid dependencies and retrieval queries, using only currently supported execution modes.
+
+AT-04 Harness compatibility. Verify that the existing tool-calling cycle, termination checks, retries, and replanning operate as before, and that the harness handles clarification at the response boundary.
+
+AT-05 Business Entity lookup: Query for "customer" retrieves the Customer entity with stable IRI and relevant definition/mappings where available.
+
+AT-06 Business Term lookup: Query for "customer date of birth" resolves an appropriate Birth Date term and its owning entity and mapped columns, if present. Synonyms work.
+
+AT-07 Multi-hop: With Customer -> Order -> OrderLine -> Product in the test graph, query "customer bought product" returns the ordered three-hop semantic path with predicate names and intermediate nodes.
+
+AT-08 Competing paths: With both purchase and support-ticket paths available, the "bought" intent ranks the purchase path above an unrelated support-ticket path.
+
+AT-09 Composite FK: A composite two-column FK is returned as two correctly ordered source-to-target column pairs and is not flattened into an incorrect single-column join.
+
+AT-10 Missing metadata: If a join mapping is absent, graph retrieval returns partial evidence plus a warning, without inventing a join.
+
+AT-11 Record vs. schema: The semantic schema alone does not generate a claim that a real customer bought a real product; record-level claims require actual data evidence.
+
+AT-12 No-match: Unknown entity/term returns status=no_match (or documented equivalent), without crashing or hallucinating graph metadata.
+
+AT-13 Boundary limits: max_hops, top_k, timeouts, traversal limits, and access controls are enforced.
+
+AT-14 Document retrieval regression: Existing retrieve_documents behavior and tool signature pass current regression tests without modification.
+
+AT-15 Combined retrieval: Existing executor can call query_knowledge_graph and retrieve_documents within its current loop when both structured and unstructured context are needed.
+
+AT-16 Business term rule: The graph can represent "Settlement Date expected after Transaction Date" without incorrectly asserting all underlying records satisfy the rule; executable validation is performed only through an explicitly configured rule engine.
+
+AT-17 Catalog configuration and mappings. Scan the databases specified in settings and verify that their metadata is catalogued. Verify that each physical table links to a Business Entity and each physical column links to a glossary Business Term, including cases where multiple tables share an entity and multiple columns share a term.
+
+AT-18 Graph provisioning. Provision the knowledge graph from a populated catalog and verify that it references the catalogued Business Terms, Business Entities, physical tables, physical columns, and keys, and preserves the table-to-entity and column-to-term links.
+
+AT-19 Catalog navigation. Verify that the catalog displays a left-hand facet with a tree that nests schemas under their databases and tables under their schemas.
+
+AT-20 Catalog knowledge graph. Right-click a database, a schema, and a table in the catalog tree. Verify that each action displays the knowledge graph scoped to the selected item and its catalogued contents.
+
+AT-21 SQL retrieval. Submit a request for database records. Verify that the executor invokes an LLM to generate SQL, calls execute_sql for the target database, and uses the returned rows in the answer. Verify the result for an empty query response and for an execution error.
+
+AT-22 HTML output. Request an HTML response for web display. Verify that generate_html returns an HTML fragment from the supplied content and that the web page displays it with data values rendered as content.
+
+AT-23 Human clarification. Verify that executor uncertainty and a final result of "No information found" each cause the harness to ask the user for additional information. Provide a reply and verify that execution continues with the original request and the clarification.
+
+9. IMPLEMENTATION DELIVERABLES
+
+9.1 RDF vocabulary/ontology definitions for business concepts, physical metadata, mappings, constraints, and provenance.
+9.2 RDF dataset access/repository layer using RDFLib 7.6.0.
+9.3 Entity/term resolution and bounded multi-hop path retrieval implementation.
+9.4 Semantic path ranking and physical mapping/context expansion.
+9.5 New MCP tool: query_knowledge_graph, including input/output schema, help text, authorization, error handling, and tests.
+9.6 Preservation and regression testing of existing MCP document tool retrieve_documents.
+9.7 Planner output contract validation using existing field names and data shape.
+9.8 Integration through the existing harness and executor, including clarification and continuation at the response boundary.
+9.9 Unit/integration/regression tests corresponding to AT-01 through AT-23.
+9.10 README/technical documentation with example query requests, responses, ontology examples, configuration, and known limitations.
+9.11 RDF knowledge graph provisioning from the existing catalog.
+9.12 Catalog UI facet for database, schema, and table navigation with a right-click knowledge graph view.
+9.13 MCP tools execute_sql and generate_html, including documented schemas and integration with the executor and web application.
+
+10. NON-GOALS AND DESIGN CONSTRAINTS
+
+10.1 DO NOT rewrite, replace, or nest the existing harness execution loop.
+10.2 DO NOT reimplement or rename retrieve_documents.
+10.3 DO NOT make graph traversal depend on the LLM generating each next graph hop.
+10.4 DO NOT collapse the business ontology into physical tables/columns.
+10.5 DO NOT equate a database FK with a verified business relationship without semantic evidence.
+10.6 DO NOT treat schema-level connections as proof of particular record-level transactions.
+10.7 DO NOT invent a new planner output format or new execution enum values not supported by the current harness.
+10.8 DO NOT make retrieval depend on an entirely new SQL engine, document loader, vector DB, or workflow framework.
+
+11. CATALOG UI REQUIREMENTS
+
+11.1 The catalog SHALL display a navigation facet on the left with a tree of catalogued databases. Each database SHALL contain its schemas, and each schema SHALL contain its physical tables (Databases -> Schemas -> Tables).
+
+11.2 Right-clicking a database, schema, or table in the catalog tree SHALL open the knowledge graph view for that selection. The view SHALL show the selected table or the tables under the selected schema or database, together with their catalogued columns, keys, and linked business metadata, subject to the user's catalog permissions.
+
+END OF REQUIREMENTS

@@ -1,0 +1,141 @@
+@prefix sh:     <http://www.w3.org/ns/shacl#> .
+@prefix xsd:    <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix prov:   <http://www.w3.org/ns/prov#> .
+@prefix mesh:   <urn:mesh:ontology:> .
+@prefix shapes: <urn:mesh:shapes:> .
+@prefix owl:    <http://www.w3.org/2002/07/owl#> .
+@prefix skos:   <http://www.w3.org/2004/02/skos/core#> .
+
+# Every graph update is validated against these shapes before it becomes visible to retrieval.
+
+shapes:BusinessEntityShape a sh:NodeShape ;
+    sh:targetClass mesh:BusinessEntity ;
+    sh:property [ sh:path rdfs:label ; sh:minCount 1 ; sh:datatype xsd:string ; sh:minLength 1 ;
+                  sh:message "A business entity needs a non-empty label." ] .
+
+shapes:BusinessTermShape a sh:NodeShape ;
+    sh:targetClass mesh:BusinessTerm ;
+    sh:property [ sh:path rdfs:label ; sh:minCount 1 ; sh:datatype xsd:string ; sh:minLength 1 ;
+                  sh:message "A business term needs a non-empty label." ] ;
+    sh:property [ sh:path mesh:boundToColumn ; sh:class mesh:Column ;
+                  sh:message "A business term can only be bound to catalog columns." ] .
+
+shapes:TermBindingShape a sh:NodeShape ;
+    sh:targetClass mesh:TermBinding ;
+    sh:property [ sh:path mesh:term ; sh:minCount 1 ; sh:maxCount 1 ; sh:class mesh:BusinessTerm ] ;
+    sh:property [ sh:path mesh:column ; sh:minCount 1 ; sh:maxCount 1 ; sh:class mesh:Column ] ;
+    sh:property [ sh:path prov:wasGeneratedBy ; sh:minCount 1 ;
+                  sh:message "A generated term binding must reference its term-generation run." ] .
+
+shapes:BusinessDefinitionShape a sh:NodeShape ;
+    sh:targetClass mesh:BusinessDefinition ;
+    sh:property [ sh:path rdfs:label ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ; sh:minLength 1 ] ;
+    sh:property [ sh:path mesh:definitionText ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ;
+                  sh:minLength 1 ; sh:maxLength 5000 ] ;
+    sh:property [ sh:path mesh:describes ; sh:minCount 1 ;
+                  sh:or ( [ sh:class mesh:BusinessEntity ] [ sh:class mesh:BusinessTerm ] ) ;
+                  sh:message "A business definition must describe at least one business entity or term." ] ;
+    sh:property [ sh:path mesh:author ; sh:minCount 1 ;
+                  sh:message "A business definition must retain its author or source reference." ] .
+
+shapes:RelationshipShape a sh:NodeShape ;
+    sh:targetClass mesh:Relationship ;
+    sh:property [ sh:path mesh:sourceEntity ; sh:minCount 1 ; sh:maxCount 1 ; sh:class mesh:BusinessEntity ] ;
+    sh:property [ sh:path mesh:targetEntity ; sh:minCount 1 ; sh:maxCount 1 ; sh:class mesh:BusinessEntity ] ;
+    sh:property [ sh:path mesh:relationshipType ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ] ;
+    sh:property [ sh:path prov:wasDerivedFrom ; sh:minCount 1 ;
+                  sh:message "A relationship must reference its supporting passage or catalog key." ] .
+
+shapes:PassageShape a sh:NodeShape ;
+    sh:targetClass mesh:Passage ;
+    sh:property [ sh:path mesh:documentId ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path mesh:chunkId ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path mesh:inDocument ; sh:minCount 1 ; sh:class mesh:Document ] .
+
+shapes:DatasetShape a sh:NodeShape ;
+    sh:targetClass mesh:Dataset ;
+    sh:property [ sh:path mesh:catalogRef ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path mesh:sourceId ; sh:minCount 1 ; sh:maxCount 1 ] .
+
+shapes:ColumnShape a sh:NodeShape ;
+    sh:targetClass mesh:Column ;
+    sh:property [ sh:path mesh:catalogRef ; sh:minCount 1 ; sh:maxCount 1 ] ;
+    sh:property [ sh:path mesh:inDataset ; sh:minCount 1 ; sh:maxCount 1 ; sh:class mesh:Dataset ] .
+
+shapes:KeyConstraintShape a sh:NodeShape ;
+    sh:targetClass mesh:KeyConstraint ;
+    sh:property [ sh:path mesh:onDataset ; sh:minCount 1 ; sh:maxCount 1 ; sh:class mesh:Dataset ] ;
+    sh:property [ sh:path mesh:keyColumn ; sh:minCount 1 ;
+                  sh:message "A key must list its member columns." ] ;
+    sh:property [ sh:path mesh:origin ; sh:minCount 1 ; sh:maxCount 1 ;
+                  sh:in ( "declared"^^xsd:string "inferred"^^xsd:string ) ] ;
+    sh:or (
+        [ sh:property [ sh:path mesh:origin ; sh:hasValue "declared"^^xsd:string ] ]
+        [ sh:property [ sh:path mesh:profilingRun ; sh:minCount 1 ; sh:class mesh:ProfilingRun ] ;
+          sh:property [ sh:path mesh:profilingScope ; sh:minCount 1 ] ]
+    ) ;
+    sh:message "Inferred keys must reference the profiling run and the data scope evaluated." .
+
+shapes:KeyColumnShape a sh:NodeShape ;
+    sh:targetClass mesh:KeyColumn ;
+    sh:property [ sh:path mesh:position ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:integer ] ;
+    sh:property [ sh:path mesh:column ; sh:minCount 1 ; sh:maxCount 1 ; sh:class mesh:Column ] .
+
+shapes:ForeignKeyShape a sh:NodeShape ;
+    sh:targetClass mesh:ForeignKey ;
+    sh:property [ sh:path mesh:referencesDataset ; sh:minCount 1 ; sh:maxCount 1 ; sh:class mesh:Dataset ] ;
+    sh:property [ sh:path mesh:columnMapping ; sh:minCount 1 ;
+                  sh:message "A foreign key must preserve its referencing-to-referenced column mapping." ] .
+
+shapes:ColumnMappingShape a sh:NodeShape ;
+    sh:targetClass mesh:ColumnMapping ;
+    sh:property [ sh:path mesh:position ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:integer ] ;
+    sh:property [ sh:path mesh:fromColumn ; sh:minCount 1 ; sh:maxCount 1 ; sh:class mesh:Column ] ;
+    sh:property [ sh:path mesh:toColumn ; sh:minCount 1 ; sh:maxCount 1 ; sh:class mesh:Column ] .
+
+# -- semantic / mapping layers ------------------------------------------------------------------
+# Status of inferred, verified or rejected statements (review decisions).
+shapes:StatusShape a sh:NodeShape ;
+    sh:targetSubjectsOf mesh:validationStatus ;
+    sh:property [ sh:path mesh:validationStatus ; sh:maxCount 1 ;
+                  sh:in ( "verified"^^xsd:string "inferred"^^xsd:string "rejected"^^xsd:string ) ;
+                  sh:message "validationStatus must be verified, inferred or rejected." ] .
+
+shapes:ConceptShape a sh:NodeShape ;
+    sh:targetClass skos:Concept ;
+    sh:property [ sh:path skos:prefLabel ; sh:minCount 1 ; sh:datatype xsd:string ; sh:minLength 1 ;
+                  sh:message "A glossary concept needs a preferred label." ] .
+
+shapes:SemanticRelationshipShape a sh:NodeShape ;
+    sh:targetClass mesh:SemanticRelationship ;
+    sh:property [ sh:path rdfs:label ; sh:minCount 1 ] ;
+    sh:property [ sh:path mesh:validationStatus ; sh:minCount 1 ] ;
+    sh:property [ sh:path mesh:objectProperty ; sh:minCount 1 ; sh:maxCount 1 ; sh:class owl:ObjectProperty ] ;
+    sh:property [ sh:path prov:wasGeneratedBy ; sh:minCount 1 ;
+                  sh:message "A proposed relationship must reference the run that proposed it." ] .
+
+shapes:JoinMappingShape a sh:NodeShape ;
+    sh:targetClass mesh:JoinMapping ;
+    sh:property [ sh:path mesh:relationship ; sh:minCount 1 ; sh:maxCount 1 ; sh:class mesh:Relationship ] ;
+    sh:property [ sh:path mesh:foreignKey ; sh:minCount 1 ; sh:maxCount 1 ; sh:class mesh:ForeignKey ] ;
+    sh:property [ sh:path mesh:mappingMethod ; sh:minCount 1 ; sh:maxCount 1 ;
+                  sh:in ( "explicit"^^xsd:string "automatic"^^xsd:string ) ] ;
+    sh:property [ sh:path mesh:keyDirection ; sh:minCount 1 ; sh:maxCount 1 ;
+                  sh:in ( "forward"^^xsd:string "reverse"^^xsd:string ) ] ;
+    sh:property [ sh:path mesh:validationStatus ; sh:minCount 1 ] .
+
+shapes:TermRelationShape a sh:NodeShape ;
+    sh:targetClass mesh:TermRelation ;
+    sh:property [ sh:path mesh:subjectTerm ; sh:minCount 1 ; sh:maxCount 1 ; sh:class mesh:BusinessTerm ] ;
+    sh:property [ sh:path mesh:objectTerm ; sh:minCount 1 ; sh:maxCount 1 ; sh:class mesh:BusinessTerm ] ;
+    sh:property [ sh:path mesh:predicate ; sh:minCount 1 ; sh:maxCount 1 ;
+                  sh:in ( mesh:expectedAfter mesh:derivedFrom mesh:equivalentTo mesh:dependsOn mesh:isPartOf ) ] ;
+    sh:property [ sh:path mesh:validationStatus ; sh:minCount 1 ] ;
+    sh:property [ sh:path prov:wasGeneratedBy ; sh:minCount 1 ] .
+
+shapes:EntityMappingShape a sh:NodeShape ;
+    sh:targetClass mesh:EntityMapping ;
+    sh:property [ sh:path mesh:dataset ; sh:minCount 1 ; sh:maxCount 1 ; sh:class mesh:Dataset ] ;
+    sh:property [ sh:path mesh:entity ; sh:minCount 1 ; sh:maxCount 1 ; sh:class mesh:BusinessEntity ] ;
+    sh:property [ sh:path mesh:validationStatus ; sh:minCount 1 ] .

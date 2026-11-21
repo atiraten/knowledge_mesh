@@ -1,0 +1,72 @@
+groups:
+  - name: knowledge-mesh
+    rules:
+      - alert: MeshHighErrorRate
+        expr: sum(rate(mesh_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(mesh_http_requests_total[5m])), 1e-9) > 0.05
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "More than 5% of Knowledge Mesh API requests fail with 5xx"}
+      - alert: MeshJobsFailing
+        expr: increase(mesh_jobs_total{status="failed"}[15m]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "Knowledge Mesh background jobs failed in the last 15 minutes"}
+      - alert: MeshGraphValidationFailures
+        expr: increase(mesh_graph_validation_failures_total[15m]) > 0
+        labels: {severity: info}
+        annotations: {summary: "Graph updates were rejected by SHACL validation"}
+      - alert: MeshSlowRetrieval
+        expr: histogram_quantile(0.95, sum by (le) (rate(mesh_stage_duration_seconds_bucket{stage="retrieval"}[10m]))) > 2
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "p95 retrieval latency above 2 seconds"}
+      - alert: MeshDown
+        expr: up{job="knowledge-mesh"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: "Knowledge Mesh /metrics endpoint is not reachable"}
+
+  - name: knowledge-mesh-agent
+    rules:
+      - alert: MeshAgentSearchFailures
+        expr: increase(mesh_agent_runs_total{outcome="failed"}[15m]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "Agent searches ended without an answer in the last 15 minutes"}
+      - alert: MeshLLMErrors
+        expr: sum(increase(mesh_llm_errors_total[15m])) > 3
+        labels: {severity: warning}
+        annotations: {summary: "More than 3 failed LLM calls (timeouts, rate limits, errors) in 15 minutes"}
+      - alert: MeshSlowSearch
+        expr: histogram_quantile(0.95, sum by (le) (rate(mesh_agent_search_duration_seconds_bucket[15m]))) > 60
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "p95 agent search latency above 60 seconds"}
+      - alert: MeshLLMCostHigh
+        expr: sum(increase(mesh_llm_estimated_cost_usd_total[1h])) > 5
+        labels: {severity: warning}
+        annotations: {summary: "Estimated LLM spend above 5 USD in the last hour (set prices in config/mesh.yaml)"}
+      - alert: MeshFaithfulnessLow
+        expr: sum(rate(mesh_judge_score_sum{metric="faithfulness"}[1h])) / clamp_min(sum(rate(mesh_judge_score_count{metric="faithfulness"}[1h])), 1e-9) < 0.7
+        for: 15m
+        labels: {severity: warning}
+        annotations: {summary: "Average LLM-judge faithfulness below 0.7 over the last hour"}
+      - alert: MeshHallucinations
+        expr: increase(mesh_hallucinations_total[1h]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "The LLM judge found unsupported claims in answers during the last hour"}
+      - alert: MeshSensitiveDataInAnswer
+        expr: increase(mesh_policy_violations_total{policy="sensitive_data_in_answer"}[15m]) > 0
+        labels: {severity: critical}
+        annotations: {summary: "An answer contained PII or a secret"}
+      - alert: MeshPromptInjectionSignals
+        expr: increase(mesh_guardrail_events_total{kind=~"suspicious_.*"}[15m]) > 0
+        labels: {severity: warning}
+        annotations: {summary: "Retrieved content looked like instructions to the model"}
+      - alert: MeshNegativeFeedback
+        expr: increase(mesh_user_feedback_total{rating="down"}[1h]) >= 3
+        labels: {severity: info}
+        annotations: {summary: "Three or more thumbs-down on answers in the last hour"}
+      - alert: MeshAccessDenied
+        expr: increase(mesh_access_denied_total[15m]) > 10
+        labels: {severity: warning}
+        annotations: {summary: "More than 10 denied API requests in 15 minutes"}
+

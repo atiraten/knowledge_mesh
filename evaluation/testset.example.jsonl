@@ -1,0 +1,2 @@
+{"id": "q001", "question": "How is a customer identified?", "relevant_document_ids": ["doc-REPLACE_WITH_ID"], "reference_answer": "Each customer is assigned a unique identifier."}
+{"id": "q002", "question": "Within how many days must invoices be paid?", "relevant_chunk_ids": ["chunk-REPLACE_WITH_ID"], "reference_answer": "Thirty days."}

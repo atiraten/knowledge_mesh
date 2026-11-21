@@ -1,0 +1,235 @@
+# Knowledge Mesh configuration. Loaded and validated at startup (see README "Configuration").
+# Relative paths are resolved against the repository root (the parent of this config/ directory).
+
+storage:
+  originals_dir: ./data/originals
+  extracted_dir: ./data/extracted
+  metadata_db: ./data/metadata.sqlite
+  # Local directories that ingestion tools may read from (FR-01.3, MCP path restriction).
+  allowed_ingest_roots:
+    - ./data/inbox
+  # Parquet repositories added on the Settings page must live under one of these directories.
+  allowed_source_roots:
+    - ./data/sources
+  max_upload_bytes: 52428800
+  allowed_extensions: [.pdf, .docx, .txt, .md, .html, .htm]
+
+crawler:
+  allowed_scope: hostname
+  allowed_hosts: []            # explicit allowlist for other hosts; "*.example.com" allows subdomains
+  max_depth: 3                 # 1 = the start page only (no robots.txt, sitemap or links)
+  max_pages: 100
+  concurrency_per_host: 2
+  requests_per_second_per_host: 2.0
+  request_timeout_seconds: 20
+  max_response_bytes: 10485760
+  respect_robots_txt: true
+  use_sitemap: true
+  deduplicate_urls: true
+  deduplicate_content_sha256: true
+  user_agent: "KnowledgeMeshBot/0.1 (+https://github.com/atiraten/knowledge_mesh)"   # contact URL per site bot policies (e.g. Wikimedia)
+
+chunking:
+  library: llamaindex
+  strategy: hierarchical
+  chunk_sizes_tokens: [2048, 1024, 256]
+  chunk_overlap_tokens: 20
+
+embedding:
+  provider: sentence_transformers
+  model: sentence-transformers/all-mpnet-base-v2
+  device: cpu
+  batch_size: 32
+  normalize: true
+
+vector_store:
+  provider: llamaindex_simple
+  document_persist_dir: ./data/index/documents
+  glossary_persist_dir: ./data/index/glossary
+
+# Sources listed here are read-only in the UI. More sources can be added on the Settings page
+# (stored in the catalog DB; their secrets go to the OS keychain or an environment variable).
+structured_sources: []
+#  - id: crm
+#    kind: database
+#    connection_url_env: CRM_DATABASE_URL       # e.g. sqlite:///./data/sources/crm.sqlite
+#  - id: customer_export
+#    kind: parquet
+#    path: ./data/sources/customers.parquet     # a file or a directory of *.parquet files
+#  - id: orders
+#    kind: databricks
+#    server_hostname_env: DATABRICKS_SERVER_HOSTNAME
+#    http_path_env: DATABRICKS_HTTP_PATH
+#    token_env: DATABRICKS_TOKEN
+#    catalog: sales
+#    schema: public
+
+profiling:
+  max_rows: 100000             # rows evaluated per dataset; 0 = full scan. Results are labeled with this scope.
+  max_key_size: 4              # largest composite unique key searched
+  max_fk_arity: 3              # largest composite foreign key searched
+  ucc_algorithm: hyucc         # hyucc | apriori
+  null_equals_null: true
+  most_common_values: 5
+  store_most_common_values: true
+  fk_identifiers_only: true          # FKs only between identifiers (class words below, declared keys, UUIDs)
+  fk_reference_primary_keys: true    # FK targets are primary keys, not columns that are merely unique
+  fk_identifier_class_words: [Identifier, Code, Number, Key, Indicator, Flag]
+
+knowledge_graph:
+  enabled: true                            # query_knowledge_graph (MCP + agent)
+  storage_backend: trig_file
+  data_path: ./data/knowledge_graph.trig   # TriG: per source, one named graph per layer (physical/semantic/mapping)
+  shapes_path: ./config/knowledge_graph_shapes.ttl
+  ontology_path: ./config/knowledge_graph_ontology.ttl   # vocabulary, published as urn:mesh:context:ontology:core
+  default_max_hops: 5
+  max_hops_limit: 8              # largest max_hops a caller may ask for
+  default_top_k: 5               # ranked paths returned
+  max_top_k: 20
+  max_candidate_paths: 200       # candidate paths kept for ranking
+  max_expansions: 5000           # traversal steps per request
+  query_timeout_seconds: 5
+  max_response_chars: 20000
+  include_inferred_relationships: true     # false: traverse verified relationships (and declared-FK edges) only
+  embedding_retrieval_enabled: true        # glossary vectors for loose phrasings + relationship similarity
+  ranking_weights: {semantic: 0.6, coverage: 0.25, status: 0.15}   # path score; length only breaks ties
+  view_max_nodes: 600            # catalog knowledge graph view
+
+# Named relationships (Customer placesOrder Order), term relations (Settlement Date expectedAfter Transaction
+# Date) and term synonyms, proposed by the term_generation model after key discovery. Status "inferred"
+# until verified on the dataset page.
+relationship_generation:
+  enabled: true
+  prompt_path: ./prompts/relationship_generation.txt
+  min_fk_confidence: medium      # inferred FKs below this get no proposal and no automatic join mapping
+  max_synonyms: 5
+
+# execute_sql: one read-only SELECT on a cataloged database / Databricks source (sqlglot-checked).
+sql_execution:
+  enabled: true
+  default_max_rows: 200
+  max_rows_limit: 1000
+  timeout_seconds: 30
+  max_sql_chars: 10000
+
+# generate_html: escaped HTML fragments from content blocks (no LLM).
+html_output:
+  max_chars: 200000
+  max_table_rows: 500
+
+entity_extraction:
+  enabled: true
+  method: lexicon              # lexicon (deterministic) | llm (uses the term_generation model)
+
+retrieval:
+  top_k: 5
+  max_graph_results: 10
+  max_top_k: 20
+  expand_parent_context: true
+  max_context_tokens: 6000
+  reranker_enabled: true       # rerank the top-k document passages with the Laya decision model (below)
+  min_document_similarity: 0.2
+  min_glossary_similarity: 0.3
+  max_queries: 5               # queries in one multi-query retrieval (the agent's retrieve_context)
+  max_parallel_queries: 4      # of those, searched at the same time
+
+# Laya reranking (2 calls): "description" choice over the top-k passages -> keep probability > min_probability
+# -> best top_n -> "quality" score -> answer with the best one rated min_quality or better, else no_answer_message.
+# Choice probabilities sum to 1 across passages, so a threshold above 0.5 lets at most one passage through.
+reranker:
+  provider: laya
+  model: convaiinnovations/laya
+  subfolder: null              # "multilingual" for non-English documents
+  min_probability: 0.4
+  top_n: 2
+  min_quality: Acceptable
+  quality_levels: [Incorrect, Ambiguous, Acceptable, Clear, Excellent]
+  choice_instructions: Which response best matches answer the question?
+  quality_instructions: Is the chosen response correct?
+  no_answer_message: I could not find a response.
+
+term_generation:
+  #provider: openai
+  #model: gpt-6-luna
+  #api_key_env: OPENAI_API_KEY
+  #prompt_path: ./prompts/term_generation.txt
+
+  # Gemini
+  provider: google
+  model: gemini-3.8-flash
+  api_key_file: config/model.key
+  prompt_path: ./prompts/term_generation.txt
+  api_key_env: GEMINI_API_KEY
+
+answer_generation:
+  enabled: True
+  # Answer mode sends the question plus the retrieved passages/catalog evidence to this model.
+  provider: google
+  model: gemini-3.8-flash
+  api_key_file: config/model.key
+  api_key_env: GEMINI_API_KEY
+
+# Search agent harness (the Search page, POST /api/search, CLI "search"):
+#   question -> planner LLM (planner prompt, no tool list) -> plan: intents with retrieval_queries
+#   -> orchestration loop: select the ready task(s) (dependencies done; together for parallel/mixed plans)
+#      -> executor loop per task (executor prompt + intents + tool list): the LLM evaluates the latest
+#         tool results and returns tool calls; the harness runs them (in parallel), adds the results to
+#         the context and loops until the LLM completes the task or max_iterations calls were made
+#      -> evaluate: answered -> next task; partial / not_found / limit / failure -> replan (planner LLM,
+#         at most max_replans times); nothing ready -> finish
+#   -> synthesis prompt: one grounded, cited answer from every task result and the gathered evidence.
+#   -> still unanswered after the replans (or nothing found)? synthesis asks the user one question; the reply
+#      (POST /api/searches/{trace_id}/clarification) continues the same request through the replan step.
+# Without a usable agent model, search falls back to direct retrieval.
+agent:
+  enabled: true
+  provider: google
+  model: gemini-3.8-flash
+  api_key_file: config/model.key
+  api_key_env: GEMINI_API_KEY
+  planner_prompt_path: ./prompts/planner.txt
+  executor_prompt_path: ./prompts/executor.txt
+  synthesis_prompt_path: ./prompts/synthesis.txt
+  max_iterations: 20           # executor LLM calls per task
+  max_intents: 5               # larger plans fall back to one intent
+  max_retrieval_queries: 3     # per intent, from the planner
+  max_parallel_intents: 3      # ready tasks of a parallel/mixed plan run at the same time
+  max_replans: 1               # planner calls to revise the plan when a task comes back unanswered
+  max_tool_calls_per_step: 4   # tool calls the executor may request in one turn
+  max_parallel_tool_calls: 4   # of those, run at the same time
+  max_observation_chars: 8000  # one tool result in the model context
+  max_context_chars: 60000     # steps shown per call / evidence passed to synthesis
+  max_evidence_items: 24
+  sql_generation_prompt_path: ./prompts/sql_generation.txt   # generate_sql tool (uses this agent model)
+  clarification_enabled: true    # ask the user when a task stays unanswered / nothing is found
+  clarification_ttl_hours: 24    # a pending question (and its saved state) is deleted after this
+  max_clarifications: 2          # questions per request
+  # Prices for the cost metrics and per-search cost (USD per 1,000 tokens); 0 = cost not tracked.
+  input_cost_per_1k_tokens: 0.0
+  output_cost_per_1k_tokens: 0.0
+
+jobs:
+  workers: 2
+
+observability:
+  enabled: true
+  service_name: knowledge-mesh
+  otlp_endpoint: http://localhost:4317
+  capture_sensitive_content: true    # local debugging only: passage text, prompts, Laya inputs and answers in traces
+  phoenix_enabled: true
+  prometheus_enabled: true
+  loki_enabled: true                # logs -> collector -> Loki (start the stack: scripts/observability.sh up)
+  ragas_offline_evaluation: true
+  phoenix_url: http://localhost:6006  # trace links on the Search page; judge/feedback annotations
+  online_judge: true                # LLM judge (the agent model) scores every search in the background
+  judge_prompt_path: ./prompts/judge.txt
+  alert_token_file: ./deploy/secrets/alert_webhook_token   # created by scripts/observability.sh up
+
+secrets:
+  backend: keyring              # OS secret store (macOS Keychain) for credentials entered on the Settings page; none = env vars only
+  service_name: knowledge-mesh
+
+api:
+  host: 127.0.0.1
+  port: 8000
+  api_key_env: KNOWLEDGE_MESH_API_KEY   # when this variable is set, /api requires X-API-Key
