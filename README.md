@@ -1,17 +1,23 @@
 # Knowledge Mesh
 
-Python POC that ingests documents and websites, catalogs relational/Parquet/Databricks sources,
-discovers keys, generates a business glossary, captures business definitions, and publishes
-everything to an RDF knowledge graph. One query returns document passages, glossary matches and
-graph evidence (search mode, no LLM needed), with optional grounded answers that cite them.
+POC that ingests documents and websites; catalogs relational databases/Parquet/Databricks sources;  discovers keys, generates a business glossary, captures business definitions, and publishes everything to an RDF knowledge graph.
+A user may query in natural language documents, databases or both. The agents searches documents, generates SQL query where applicable, runs the SQL query and returns a response grouded in evidence based on document policies and document citations along with database columns requested.
+
+*** Knowledge Mesh extracts database metadata while leaving the underlying data in place. No Data movement ***
 
 Specification: [doc/knowledge_mesh_requirements.md](doc/knowledge_mesh_requirements.md).
+Knowledge Implementation: [doc/knowledge_graph_graphrag_implementation_requirements.txt](doc/knowledge_graph_graphrag_implementation_requirements.txt).
+Agent Loop in ASD STE100: [doc/knowledge_mesh_requirements](doc/knowledge_mesh_requirements).
 
 ## Quick start
 
+Requires Python 3.11 or later.
+
 ```bash
+git clone https://github.com/atiraten/knowledge_mesh.git
+cd knowledge_mesh
 python3 -m venv .venv
-.venv/bin/pip install -e ".[google,dev]"        # add ,databricks / ,openai / ,eval as needed
+.venv/bin/pip install -e ".[google,laya,databases,eval,dev]"   # add ,databricks / ,openai as needed
 .venv/bin/python src/harness.py check-config    # validate config/mesh.yaml
 .venv/bin/python src/harness.py serve           # UI + API on http://127.0.0.1:8000
 .venv/bin/python src/harness.py mcp             # MCP server (stdio)
@@ -21,6 +27,10 @@ scripts/mesh.sh start                           # observability stack (Podman) +
 scripts/mesh.sh status | stop | restart         # add --no-observability to leave the stack alone
 scripts/observability.sh up | down | status | logs [service]   # only the observability stack
 ```
+
+**Model key.** The Gemini models (`term_generation`, `answer_generation` and `agent` in `config/mesh.yaml`)
+read the API key from the `GEMINI_API_KEY` environment variable, or, if it is not set, from
+`config/model.key` (a file holding only the key; it is gitignored and never committed).
 
 The first indexing run downloads `sentence-transformers/all-mpnet-base-v2` (~420 MB) into the
 Hugging Face cache; after that embeddings run fully locally (set `embedding.local_files_only: true`
@@ -149,7 +159,24 @@ address, city, zip code, email, phone, dates of birth / marriage / death, place 
 national identifiers, Medicare / Medicaid / medical record numbers, …; a company is not a person). It is
 stored in `columns.term_sensitive` (NULL = not assessed: terms generated before the flag, or a line without
 it), shown as a red "sensitive" badge on the term, and drives the red marking of SQL results. Changing the
-prompt changes its version, so the next catalog run regenerates the terms of every dataset (term model calls). The
+prompt changes its version, so the next catalog run regenerates the terms of every dataset (term model calls).
+
+**Term review and correction.** After generation, the same model reviews the generated terms with
+`prompts/term_correction.txt` (`term_generation.correction_prompt_path`). It receives one row per column,
+`column|data_type|business term|description|decoding`, and answers `column|APPROVE|` or
+`column|REJECT|<reason>`; a column without a verdict line counts as rejected. Rejected columns go back to the
+generation prompt (only those columns), followed by a "CORRECTIONS REQUIRED" section with each column's
+previous term and the reviewer's reason. The corrected rows are reviewed again, at most
+`term_generation.max_correction_rounds` times (default 3): worst case 1 generation + 1 review + 3 × (correction
++ review) calls per batch. A column still rejected after that is left **blank**: no term, `term_status =
+'rejected'`, and the last reason in `term_error` ("rejected by review: …"), shown in the catalog table grid; it
+is left out of the glossary and the graph and is retried on the next run. Each review's rejections and every
+blank column are listed in the run's issues (`term_generation_runs.error`), as is any generation, review or
+correction answer cut off at `max_output_tokens` ("… response cut off at max_output_tokens (325 visible + 7867
+thinking tokens)"); Gemini's thinking tokens count against `term_generation.max_output_tokens` (default 8192).
+Raising it lets the model think longer than the request deadline (`timeout_seconds`, 120 s, which Gemini also
+enforces: a 504 DEADLINE_EXCEEDED). The class-word list is rendered with each word once. The prompt version covers both
+prompts. When the correction prompt file does not exist, the review is skipped and the run says so. The
 table's **business entity** is the decoded table name the model writes at the start of each line;
 when it equals the physical name, a heuristic is used instead (split, expand abbreviations,
 singularize). Terms and entities go into a separate persistent `SimpleVectorStore`. When term
@@ -224,7 +251,7 @@ quality call decides. If Laya fails, results fall back to similarity order with
 Decisions (probabilities, quality levels, call count, latency) are returned under `reranking`
 and traced as a `RERANKER` span.
 
-**Retrieval.** `retrieve_context` searches both indexes (top-K per index, default 5, cosine
+**Retrieval.** `retrieve_documents` searches both indexes (top-K per index, default 5, cosine
 similarity), drops hits below `retrieval.min_*_similarity`, and returns each matched leaf chunk
 with its whole parent chain under `parents` (nearest first: the 1024-token parent, then the
 2048-token one). Parent text fills `max_context_tokens` one level at a time, and a parent shared
@@ -262,7 +289,7 @@ question -> planner LLM (planner prompt) -> plan
    `{"action": "tools", "tool_calls": [{"tool", "arguments"}, ...]}` (run in parallel, up to
    `agent.max_tool_calls_per_step`) or `{"action": "complete", "status": "answered|partial|not_found",
    "answer"}`. The harness runs the tools, adds the results to the context and loops, up to
-   `agent.max_iterations` (default 20) calls per task. The task's first `retrieve_context` call always
+   `agent.max_iterations` (default 20) calls per task. The task's first `retrieve_documents` call always
    searches its planned `retrieval_queries` (the call's `note` shows any the model left out). Invalid
    replies and tool errors are fed back and count as iterations; when the context is full, the oldest
    results become one-line stubs that keep their evidence IDs.
@@ -292,7 +319,7 @@ with the reply as the reason (answered tasks are kept), shows the reply to the e
 continues with the same loop; the new response has `continues` (the earlier trace). At most
 `agent.max_clarifications` questions per request; each question accepts one reply.
 
-`retrieve_context` takes a list of queries: they are searched in parallel (`retrieval.max_parallel_queries`)
+`retrieve_documents` takes a list of queries: they are searched in parallel (`retrieval.max_parallel_queries`)
 and merged into one result, so a passage, glossary entry or graph fact found by several queries appears
 once, with its best score and `matched_queries`. Within a task, an item already shown is returned as
 `seen_before` without its text; it keeps its evidence ID. Other tools: `read_document`, `find_datasets`,
@@ -310,7 +337,7 @@ one-shot answer mode.
 ## Knowledge graph retrieval (`query_knowledge_graph`)
 
 One call per planner intent (MCP tool and agent tool; `graph/retriever.py`). The spec's
-`retrieve_documents` is the existing `retrieve_context` (unchanged signature and behaviour; its graph
+`retrieve_documents` is the existing `retrieve_documents` (unchanged signature and behaviour; its graph
 evidence now also lists the proposed relationships and term relations, labelled with their status).
 
 1. **Resolve** each retrieval query: an IRI in the text, then exact / normalized / plural /
@@ -505,7 +532,8 @@ Configuration is read at startup, so every change needs a restart. After the res
 | `profiling.*` | Next `discover_keys` / catalog run. Existing inferred keys keep their recorded scope until re-run. |
 | `chunking.*`, `entity_extraction.*` | New and changed documents. Run `reindex` to re-chunk and re-extract existing documents. |
 | `embedding.*` (model, revision, normalize) | **Reindex required.** An index built with another model refuses to open (`incompatible_index`). Run `reindex --rebuild`: old index directories are kept as `*.bak-<timestamp>`. |
-| `term_generation.prompt_path` content | Prompt version changes, so the next catalog run regenerates every column's term. |
+| `term_generation.prompt_path` / `correction_prompt_path` content | Prompt version changes, so the next catalog run regenerates (and reviews) every column's term. |
+| `term_generation.max_correction_rounds` | Next term generation run. |
 | `term_generation.provider/model/abbreviations/class_words` | **Regeneration required.** Run `POST /api/datasets/generate-terms {"force": true}`. |
 | `knowledge_graph.shapes_path` | Validates subsequent graph updates. Re-run cataloging/indexing to re-validate existing contexts. |
 | `knowledge_graph.*` (limits, `ranking_weights`, `include_inferred_relationships`, `embedding_retrieval_enabled`) | Subsequent `query_knowledge_graph` calls. |
@@ -518,7 +546,7 @@ Configuration is read at startup, so every change needs a restart. After the res
 ## API, UI and MCP
 
 The browser UI at `/` covers agent search (answer, plan, per-intent steps, evidence, HTML output, clarification
-questions), uploads, crawls, the catalog, definitions and jobs. The Catalog page has a left facet with a tree of
+questions), Document Ingestion (two tabs: **Documents** for uploads, the inbox directory and the ingested documents, `#ingestion/documents`; **URLs** for website crawls, `#ingestion/urls`; the menu opens the last tab used in the browser), the catalog, definitions and jobs. The Catalog page has a left facet with a tree of
 databases (one per configured source, shown as `id (database)`), their schemas and their tables. The facet stays
 visible on every catalog page; clicking an element shows it on the right: a **database** shows its description and
 a grid of its schemas with their description (schema descriptions are not captured yet, so the column is blank);
@@ -542,7 +570,7 @@ Set the env var named by `api.api_key_env` (default `KNOWLEDGE_MESH_API_KEY`) to
 MCP tools return bounded results with `ok`, `trace_id` and references (`job_id`, `manifest_ref`,
 `/api/...`), and structured errors. `query_knowledge_graph`, `execute_sql` and `generate_html` publish input and
 output schemas (`tool_schemas.py`); their descriptions state input, purpose and output. Document retrieval is
-`retrieve_context` (the spec's `retrieve_documents`). They accept an optional W3C `traceparent` to join a caller's
+`retrieve_documents` (the spec's `retrieve_documents`). They accept an optional W3C `traceparent` to join a caller's
 trace, and `wait_seconds` to block until a job finishes. Local paths must be under
 `storage.allowed_ingest_roots`.
 
@@ -572,7 +600,7 @@ goes away later, the app logs one clear warning per 5 minutes instead of one per
 | Area | What is recorded | Where |
 |---|---|---|
 | Execution tracing | One `agent.search` span per search (`user.id`, `session.id` per browser tab, prompt versions); `agent.plan`, `agent.replan`, one `agent.intent` span per task run linked to the spans of the tasks it depends on; `agent.decision` events (next / replan / finish) and `agent.step` events in order | Phoenix (sessions, trace tree), "open trace in Phoenix" on the Search page |
-| LLM | Provider, model, role (`agent_planner`, `agent_step`, `agent_synthesis`, `agent_judge`, …), OpenInference input/output messages (when `capture_sensitive_content` is on), invocation parameters, prompt-file hash, tokens, latency, retries, error type, estimated cost | Phoenix; `mesh_llm_*` metrics |
+| LLM | Provider, model, role (`agent_planner`, `agent_step`, `agent_synthesis`, `agent_judge`, `term_generation`, `term_review`, `term_correction`, …), OpenInference input/output messages and `input.value` / `output.value` (when `capture_sensitive_content` is on; each cut at 20,000 characters), invocation parameters, prompt-file hash, tokens (prompt, answer, thinking as `llm.token_count.completion_details.reasoning`), why the answer ended (`llm.finish_reason`: Gemini `STOP` / `MAX_TOKENS` / `SAFETY`, OpenAI `stop` / `length` / …) and `llm.output_truncated` when it was cut off at `max_output_tokens` (thinking tokens count against it), latency, retries, error type, estimated cost (thinking tokens billed as output). A cut-off answer is also counted (`mesh_llm_truncated_responses`) and logged as "LLM output cut off at max_output_tokens" with token counts, never the text | Phoenix (a job's model calls are in the job's trace: "open trace in Phoenix" on the job page); `mesh_llm_*` metrics |
 | Tools | MCP and agent tools: name, sanitized parameters, status, error code, latency, result size | `agent.tool.*` / `mcp.*` spans; `mesh_tool_calls_total{source}`, `mesh_tool_duration_seconds` |
 | Context | Per executor call: characters and estimated tokens, steps and results shown, results replaced by stubs, truncated results, `seen_before` items, system-prompt version; the agent has no memory across searches | `agent.context` events; `mesh_agent_context_*` |
 | RAG | Queries, retrieved IDs, scores and text, merged-duplicate ratio, Laya decisions; citation coverage and invalid citations; judge faithfulness and context relevance | retrieval spans; `mesh_retrieval_top_score`, `mesh_eval_citation_coverage` |
@@ -628,7 +656,7 @@ with the local embedding model, so no separate Ragas key is needed.
   share one code path; the planner uses the provider's JSON-schema output mode.
 
 - **Knowledge graph / GraphRAG requirements (doc/knowledge_graph_graphrag_implementation_requirements.txt),
-  decided with the user:** `retrieve_context` is the spec's `retrieve_documents`; new tools have one
+  decided with the user:** `retrieve_documents` is the spec's `retrieve_documents`; new tools have one
   implementation registered on the MCP server and in the agent tool box; SQL comes from an agent-only
   `generate_sql` tool using the agent model; `execute_sql` keeps the existing protection (API key, read-only
   session, search scope) plus a sqlglot check, for database and Databricks sources; named relationships, term
@@ -676,3 +704,5 @@ Knowledge graph / GraphRAG / MCP requirements (AT-01 … AT-23):
 | `tests/test_sql_html_tools.py` | AT-21, AT-22 |
 | `tests/test_catalog_ui_api.py` | AT-19, AT-20 (API, static assets, app.js parse), catalog grids, generic data type, grid HTML; clicks in the browser need a walkthrough |
 | `tests/test_sensitive_data.py` | sensitive term flag (prompt, parsing, storage, migration), execute_sql lineage marking, red HTML grid, MCP |
+| `tests/test_term_review.py` | term review and correction: review rows, correction prompt, 3 rounds, blank columns, missing verdicts, audit trail |
+| `tests/test_llm_observability.py` | finish reason and thinking tokens (Gemini, OpenAI), cut-off answers on spans / metrics / logs / term runs, class words once, job → Phoenix trace link |

@@ -160,6 +160,10 @@ term_generation:
   api_key_file: config/model.key
   prompt_path: ./prompts/term_generation.txt
   api_key_env: GEMINI_API_KEY
+  # Review of the generated terms by the same model; rejected columns are sent back for correction (only those
+  # columns, with the reviewer's reason) up to max_correction_rounds times, then left blank.
+  correction_prompt_path: ./prompts/term_correction.txt
+  max_correction_rounds: 3
 
 answer_generation:
   enabled: True
