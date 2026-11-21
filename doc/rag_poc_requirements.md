@@ -6,7 +6,7 @@
 
 ## 1. Purpose
 
-Build a Python-based web chatbot that ingests documents and websites, indexes document sections, retrieves relevant evidence for user questions, and optionally generates grounded answers with source citations. The POC shall use Model Context Protocol (MCP) tools, LlamaIndex hierarchical chunking, local embeddings, and open-source observability.
+Build a Python-based agent that provides an web interface that ingests documents and websites, indexes document sections, structured data file, provides a configuration for database connections, parquet files and databrick. The agent retrieves relevant evidence for user questions, and optionally generates grounded answers with source citations. The POC uses Model Context Protocol (MCP) tools, LlamaIndex hierarchical chunking, local embeddings, and open-source observability.
 
 ## 2. Scope
 
