@@ -1,12 +1,19 @@
 # Knowledge Mesh — Requirements Specification
 
-**Version:** 1.0  
-**Date:** 2026-11-19  
+**Version:** 1.1  
+**Date:** 2026-11-21  
 **Status:** Ready for incremental POC implementation, with source connector and LLM choices pending
+
+**Changes in 1.1**
+- Business definitions reference business terms only (never business entities), may reference the policy document where they are defined (with an optional page or section), and the author is optional (§2, FR-02, FR-13).
+- Business glossary maintenance in the Definitions menu: Business Glossary, Business Entities and Business Definitions tabs (§2, FR-12, new FR-15, §7, new AT-23).
+- `retrieve_documents` takes a list of queries (FR-07, §5).
+- Observability services may run with Docker Compose or Podman (§8).
+- Related specifications referenced (new §13); typos, grammar and heading levels corrected.
 
 ## 1. Purpose
 
-Build a Python-based Knowledge Mesh with a FastAPI browser interface for ingesting documents and websites and cataloging configured database, Parquet, and Databricks sources. The system indexes document passages, extracts business entities and relationships from documents, discovers structured keys, generates business terms and entities from schemas, and captures business definitions. It persists structured metadata in SQLite and represents business concepts, relationships, and constraints in an RDF knowledge graph. A single query can retrieve document passages, structured metadata, and graph evidence for search or optional grounded answers with citations.
+Build a Python-based Knowledge Mesh with a FastAPI browser interface (**Not for Production Use**) for ingesting documents and websites and cataloging configured database, Parquet, and Databricks sources. The system indexes document passages, extracts business entities and relationships from documents, discovers structured keys, generates business terms and entities from schemas, and captures business definitions. It persists structured metadata in SQLite and represents business concepts, relationships, and constraints in an RDF knowledge graph. A single query can retrieve document passages, structured metadata, and graph evidence for search or optional grounded answers with citations.
 
 ## 2. Scope
 
@@ -22,24 +29,25 @@ Build a Python-based Knowledge Mesh with a FastAPI browser interface for ingesti
 - Top-K semantic retrieval, with default K = 5.
 - MCP tools for crawling, ingestion, indexing, document reading, and retrieval.
 - FastAPI page with a simple browser interface for uploads, URL submission, search, and chat.
-- Extract Business Entities from the documents such as Customer, Orders, Supplier, Account, Payment ...etc and the relationships between these entities.
+- Extract business entities (such as Customer, Order, Supplier, Account and Payment) and the relationships between them from documents.
 
-### Business Definitions
-- Capture Business Definitions such as "Active Customer", "Net Revenue" 
-- Provide a web page to provide enter these definitions. These definitions shall have to their corresponding business terms and/or business entities.
+#### Business Definitions
+- Capture business definitions such as "Active Customer" and "Net Revenue".
+- Provide web pages (Definitions menu) to view, add, edit and delete business definitions. A definition references one or more business terms, never business entities, and may reference the policy document where it is defined.
+- Provide web pages to maintain the business glossary: business terms (view, add, edit, delete) and business entities (view, edit, delete).
 
 #### Structured Data
 - Use SQLite to store structured metadata.
-- Use an MSP tool to extract the metadata from databases, parquet and databricks.
-- Use an MCP tool to extract unique keys, primary keys and foreign key between entities and populate the metadata accordingly. Use HyUCC and Apriori algorithms to detect unique keys. A unique Key can be a composite key. Use Binder to detect Foreign Keys.
-- Use an LLM configured in config/mess.yaml to generate a business term for each column and Business Entities for table name. Use the prompt in prompts/term_generation.txt . 
-- Create a special index for Business Terms (extracted from column names) and Business Entities (extracted from table names) in LlamaIndex `SimpleVectorStore`  to search for similar business terms.
-- Build web page to view the metadata with hierarchy Database list --> Schemas --> Tables--> Columns
-- Column shall have display a link to the business terms.
+- Use an MCP tool to extract the metadata from databases, Parquet files and Databricks.
+- Use an MCP tool to discover unique, primary and foreign keys between tables and populate the metadata accordingly. Use the HyUCC and Apriori algorithms to detect unique keys; a unique key can be composite. Use BINDER to detect foreign keys.
+- Use an LLM configured in `config/mesh.yaml` to generate a business term for each column and a business entity for each table, with the prompt in `prompts/term_generation.txt`.
+- Create a dedicated index of business terms (generated from columns) and business entities (generated from tables) in a LlamaIndex `SimpleVectorStore` to search for similar terms.
+- Build a web page to view the metadata with the hierarchy Database → Schemas → Tables → Columns.
+- Each column shall display a link to its business term.
 
-### Knowledge Graph
-- Build an knowledge graph to represent the entities, their relationship and constraints.
-- Use RDFLib + pySHACL for Knowledge Graph to store the Business Entities, Business Terms, Business Definitions and Constraints.
+#### Knowledge Graph
+- Build a knowledge graph to represent the entities, their relationships and constraints.
+- Use RDFLib + pySHACL for the knowledge graph that stores the business entities, business terms, business definitions and constraints.
 
 #### Observability
 - OpenTelemetry-based instrumentation; Phoenix, Prometheus, Grafana, Loki, and Ragas for observability/evaluation.
@@ -64,7 +72,7 @@ Knowledge Mesh orchestrator
     |-- MCP structured metadata extraction and key discovery
     |     -> SQLite catalog of sources, tables, columns, and keys
     |     -> LLM-generated business entities and terms -> business glossary index
-    |-- Business definition capture and graph publication
+    |-- Business glossary (terms, entities) and business definition maintenance, and graph publication
     |     -> RDFLib graph + pySHACL validation
     `-- MCP retrieval across both indexes and the knowledge graph
           -> ranked passages, metadata references, and graph evidence
@@ -81,7 +89,7 @@ Document passages and the business glossary SHALL use separate persistent LlamaI
 
 ### FR-01 — Supported inputs
 
-1. The system SHALL ingest local **PDF, DOCX, TXT**, and HTML content from URLs.
+1. The system SHALL ingest local **PDF, DOCX and TXT** files, and HTML content from URLs.
 2. The system SHALL accept document uploads through the web UI.
 3. The system SHALL ingest supported files from a configured local directory.
 4. The system SHALL accept a starting HTTP/HTTPS URL and crawl eligible pages on that website.
@@ -96,16 +104,16 @@ Document passages and the business glossary SHALL use separate persistent LlamaI
 3. Every indexed chunk SHALL reference its source `document_id`, its own `chunk_id`, and its parent node ID if applicable.
 4. Document citations SHALL resolve to the original URL or stored document and the page or section when available.
 5. Structured metadata SHALL carry stable source, dataset, and column identifiers that resolve to the configured source and its physical schema or file. Discovered keys SHALL also reference the profiling run and the data scope evaluated.
-6. Business entity, term, definition, relationship, and constraint records SHALL carry stable references and provenance. Provenance SHALL identify the supporting document passage, structured catalog record, profiling run, or captured definition as applicable.
+6. Business entity, term, definition, relationship, and constraint records SHALL carry stable references and provenance. Provenance SHALL identify the supporting document passage, structured catalog record, profiling run, or captured definition (with its policy document when one is given) as applicable.
 
 ### FR-03 — Website crawling rules
 
 1. Crawling SHALL begin with the supplied URL and follow only HTTP/HTTPS links within the configured scope.
 2. The default allowed scope SHALL be the exact starting hostname; other hosts and subdomains SHALL require explicit allowlisting.
-3. Crawling SHALL enforce configurable maximum depth, maximum pages, concurrency, per-host request rate, timeout, and maximum response size.
+3. Crawling SHALL enforce configurable maximum depth, maximum pages, concurrency, per-host request rate, timeout, and maximum response size. Depth is counted from 1 (the start page).
 4. Recommended POC defaults: **depth = 3**, **maximum pages = 100**, **concurrent requests per host = 2**. These are defaults, not hardcoded limits.
 5. The crawler SHALL obey `robots.txt` rules applicable to its user agent and SHOULD honor crawl-delay where practical.
-   *Exception:* a single-page fetch (max depth 1, depth counted from 1 = the start page) is user-requested, not a crawl, and does not consult `robots.txt`, the sitemap or page links.
+   *Exception:* a single-page fetch (maximum depth 1) is user-requested, not a crawl, and does not consult `robots.txt`, the sitemap or page links.
 6. The crawler SHALL normalize URLs (fragments removed, canonicalization policy documented) and deduplicate repeated URLs.
 7. The crawler SHALL deduplicate identical downloaded content using a content hash; distinct URLs with identical content SHALL not generate duplicate embeddings.
 8. The crawler SHOULD discover eligible URLs from same-site links and may use a sitemap where available.
@@ -147,7 +155,7 @@ Document passages and the business glossary SHALL use separate persistent LlamaI
 
 ### FR-07 — Retrieval
 
-1. The `retrieve_documents` MCP tool SHALL search document leaf chunks and the separate index of business terms and entities by vector similarity. A single query SHALL be able to return evidence from both indexes.
+1. The `retrieve_documents` MCP tool SHALL take a list of queries (up to `retrieval.max_queries`) and search document leaf chunks and the separate index of business terms and entities by vector similarity. A result found by several queries SHALL be returned once. A single call SHALL be able to return evidence from both indexes.
 2. **K SHALL default to 5 per searched index**, configured under retrieval settings in **`config/mesh.yaml`**. The caller MAY override K within configured bounds and filter by evidence type or source.
 3. Document results SHALL include `chunk_id`, `document_id`, excerpt, source URL/path, available page or section, similarity score, and parent reference.
 4. Glossary results SHALL include the business label, record type, similarity score, and references to the originating table or column. The tool SHALL return relevant business definitions, relationships, and constraints by looking up business concepts in the knowledge graph. Graph evidence SHALL include provenance and respect the configured result limit.
@@ -188,17 +196,31 @@ Document passages and the business glossary SHALL use separate persistent LlamaI
 2. The system SHALL validate generated output against the source tables and columns before publishing it. The business term SHALL link to its column and the business entity to its table or dataset. When returned by the template, the term description and explanation SHALL be retained.
 3. The system SHALL index these business terms and entities in a dedicated persistent LlamaIndex `SimpleVectorStore` and publish them to the knowledge graph.
 4. A term-generation failure SHALL be reported against the affected dataset. Catalog extraction and key discovery SHALL remain available when the term-generation model is unconfigured or unavailable.
+5. Business terms and business entities SHALL be stored once each in the business glossary (SQLite). Columns SHALL reference their business term, and tables their business entity.
+6. Term generation SHALL keep the edits users make in the business glossary and SHALL NOT re-create a business term or business entity that a user deleted.
 
 ### FR-13 — Business definitions
 
-1. The system SHALL let users capture and retrieve a named business definition, such as “Active Customer,” with its definition text and links to the business entities or terms it describes.
-2. The system SHALL retain the definition's author or source reference and store the definition in the knowledge graph so retrieval can return it as evidence.
+1. The system SHALL let users capture, view, edit, delete and retrieve a named business definition, such as “Active Customer,” with its definition text. A definition SHALL reference one or more existing business terms and SHALL NOT reference business entities.
+2. A definition MAY reference the ingested policy document where it is defined and, when it does, MAY give the page or section. The author is optional.
+3. The system SHALL store definitions in the knowledge graph, validated against the SHACL shapes, so retrieval can return them as evidence.
 
 ### FR-14 — Knowledge graph and constraint validation
 
 1. The system SHALL use RDFLib to build and persist an RDF graph of business entities, terms, definitions, relationships, and constraints. It SHALL link business concepts to their source documents or structured catalog records.
 2. The graph SHALL represent declared keys and inferred key candidates with their respective provenance. Composite keys and foreign-key relationships SHALL preserve column membership and mapping.
 3. The system SHALL use pySHACL to validate graph updates against SHACL shapes before making the updated graph available to retrieval. Validation failures SHALL report the affected records and violated shapes.
+
+### FR-15 — Business glossary maintenance (Definitions menu)
+
+1. The Definitions menu SHALL offer three tabs: **Business Glossary**, **Business Entities**, and **Business Definitions**.
+2. Business Glossary: users SHALL be able to view, add, edit (label, description, sensitive flag), and delete business terms.
+3. Business Entities: users SHALL be able to view, edit (label, description), and delete business entities. Business entities are not added by hand.
+4. Business Definitions: users SHALL be able to view, add, edit, and delete business definitions as specified in FR-13.
+5. Editing a label SHALL keep the term's or entity's stable identifier (slug and graph URI).
+6. A business term referenced by a business definition SHALL NOT be deleted; the refusal SHALL list the definitions that reference it.
+7. Deleting a business entity SHALL remove it everywhere: tables lose it, its document mentions are removed, and relationships to or from it are deactivated.
+8. Changes SHALL be published to the knowledge graph and the business glossary index.
 
 ## 5. MCP Tool Requirements
 
@@ -212,7 +234,9 @@ The MCP server(s) SHALL expose the following interfaces. The application service
 | `read_document` | `document_id`, optional bounded page/section/chunk range | Bounded text, source metadata, references |
 | `extract_structured_metadata` | configured structured source ID, optional dataset selection | `job_id`, status, counts, SQLite catalog references |
 | `discover_keys` | catalog dataset IDs, optional profiling scope | `job_id`, declared and inferred key counts, profiling and catalog references |
-| `retrieve_documents` | query, optional `top_k`, evidence types, and source filters | Ranked passages and glossary matches, linked graph evidence, source references |
+| `retrieve_documents` | list of queries, optional `top_k`, evidence types, and source filters | Ranked passages and glossary matches, linked graph evidence, source references |
+
+The GraphRAG specification adds the `query_knowledge_graph`, `execute_sql`, and `generate_html` tools (see §13).
 
 ### MCP operational requirements
 
@@ -227,7 +251,7 @@ The MCP server(s) SHALL expose the following interfaces. The application service
 
 ```json
 {
-  "query": "How do we define an active customer, and how is a customer identified?",
+  "queries": ["How do we define an active customer, and how is a customer identified?"],
   "top_k": 5,
   "results": [
     {
@@ -357,7 +381,7 @@ Source configuration SHALL reference connector credentials through environment v
 
 ## 7. FastAPI Application and UI
 
-The application SHALL offer a lightweight browser interface for document uploads, crawl submissions, structured cataloging and key discovery, job status, business definition capture, and search. Users SHALL be able to view configured structured sources, inspect cataloged datasets and keys, and follow citations from retrieved documents, metadata, and graph evidence.
+The application SHALL offer a lightweight browser interface for document uploads, crawl submissions, structured cataloging and key discovery, job status, business glossary and business definition maintenance (the Definitions menu with its Business Glossary, Business Entities, and Business Definitions tabs; FR-15), and search. Users SHALL be able to view configured structured sources, inspect cataloged datasets and keys, and follow citations from retrieved documents, metadata, and graph evidence.
 
 | Method | Route | Function |
 |---|---|---|
@@ -368,8 +392,14 @@ The application SHALL offer a lightweight browser interface for document uploads
 | `GET` | `/api/structured-sources` | List configured structured sources |
 | `POST` | `/api/structured-sources/{id}/catalog` | Catalog selected datasets and queue key discovery and configured term generation |
 | `GET` | `/api/datasets/{id}` | Inspect schema, keys, and linked business metadata |
-| `POST` | `/api/business-definitions` | Capture a business definition |
-| `GET` | `/api/business-definitions/{id}` | Read a captured definition |
+| `GET` | `/api/business-terms` | List business terms |
+| `POST` | `/api/business-terms` | Add a business term |
+| `GET` / `PUT` / `DELETE` | `/api/business-terms/{slug}` | Read, edit, or delete a business term |
+| `GET` | `/api/business-entities` | List business entities |
+| `GET` / `PUT` / `DELETE` | `/api/business-entities/{slug}` | Read, edit, or delete a business entity |
+| `GET` | `/api/business-definitions` | List business definitions |
+| `POST` | `/api/business-definitions` | Capture a business definition (business terms only; optional policy document) |
+| `GET` / `PUT` / `DELETE` | `/api/business-definitions/{id}` | Read, edit, or delete a business definition |
 | `GET` | `/api/jobs/{id}` | Job progress and failures |
 | `POST` | `/api/search` | Retrieve ranked passages and glossary matches with linked graph evidence |
 | `POST` | `/api/chat` | Generate grounded answer (when LLM configured) |
@@ -413,7 +443,7 @@ The application SHALL offer a lightweight browser interface for document uploads
 4. Evaluation SHALL run at meaningful quality checkpoints, **not necessarily as a model-graded evaluation of every processing step or every production request**.
 5. Ragas evaluations SHALL be runnable independently on a repeatable test set, with scores linked to relevant run/version metadata.
 6. Prometheus/Grafana dashboards SHOULD include request rates/errors, latency distributions, ingestion throughput, failure counts, indexing duration, and CPU/memory utilization.
-7. Local POC deployments MAY run supporting observability services using Docker Compose.
+7. Local POC deployments MAY run supporting observability services with a Compose file (Docker Compose, or Podman with `podman compose`).
 
 ## 9. Security and Reliability
 
@@ -444,15 +474,16 @@ The POC SHALL pass the following tests:
 11. **MCP context isolation:** Verify that crawling, indexing, and structured profiling tools return references and bounded summaries.
 12. **Observability:** Inspect correlated traces, metrics, and logs for document ingestion, structured cataloging, key discovery, graph validation, and mixed retrieval, including one intentionally failing request.
 13. **Crawl safety:** Reject an unauthorized off-scope link and a blocked private-network URL.
-14. **User experience:** From a browser, upload a file, submit a URL, start a structured catalog job, inspect its results, capture a definition, and follow source references from search.
+14. **User experience:** From a browser, upload a file, submit a URL, start a structured catalog job, inspect its results, maintain a business term, capture a definition, and follow source references from search.
 15. **Answer mode (conditional):** Once an answer model is configured, demonstrate a grounded answer that cites both document and structured or graph evidence and an explicit insufficient-evidence response to an unsupported question.
 16. **Structured catalog:** Extract metadata from a relational database, a Parquet file, and Databricks. Verify that schemas and available declared keys are stored in SQLite with stable source references.
 17. **Key discovery:** Use fixtures containing a single-column unique key, a composite unique key, and single-column and composite foreign-key candidates. Verify the expected findings, column mappings, and the distinction between declared keys and inferred candidates.
 18. **Document entities and relationships:** Ingest a document describing a relationship between two business entities. Verify that both entities and their relationship appear in the graph with references to the supporting passage.
 19. **Business terminology:** With the term-generation model configured, generate one term for each column and an entity for each table in a fixture. Verify that a similar phrase retrieves the expected term or entity with its physical schema reference.
-20. **Definitions and graph validation:** Capture a definition such as “Active Customer” and verify that a query retrieves it through its linked business concept. Verify that a graph update violating a SHACL shape reports the violation and leaves the previously published evidence available.
+20. **Definitions and graph validation:** Capture a definition such as “Active Customer” and verify that a query retrieves it through a business term it references. Verify that a graph update violating a SHACL shape reports the violation and leaves the previously published evidence available.
 21. **Mixed search:** Run a query with support in both a document passage and structured metadata. Verify that the same search returns the passage, glossary matches, and relevant graph evidence with resolvable provenance.
 22. **Structured refresh:** Retry an unchanged structured ingestion and verify that catalog records, glossary vectors, and graph assertions remain unique. Refresh a changed schema and verify that stale evidence is retired.
+23. **Business glossary maintenance:** Rename a business term and verify that it keeps its identifier and that the graph and search show the new label; regenerate terms and verify that the edit is kept; verify that deleting a term referenced by a definition is refused; delete a business entity and verify that it is removed from its tables, document mentions, and relationships.
 
 ## 11. Suggested Implementation Sequence
 
@@ -471,3 +502,8 @@ The POC SHALL pass the following tests:
 - Select the term-generation model and define how the table-level entity label will be produced alongside the prompt's per-column output.
 - Select the document entity and relationship extraction method, the rules for matching concepts across sources, and the initial SHACL shapes.
 - Select a separately configurable answer-generation model if answer mode is enabled.
+
+## 13. Related Specifications
+
+- [`knowledge_graph_graphrag_implementation_requirements.txt`](knowledge_graph_graphrag_implementation_requirements.txt): knowledge graph retrieval (`query_knowledge_graph`), SQL execution (`execute_sql`), HTML output (`generate_html`), and their integration with the planner and executor, including clarification.
+- [`agent_loop_asd_ste100_style.md`](agent_loop_asd_ste100_style.md): the agent loop. The executor uses the MCP server's tools, discovered from and called through MCP only.

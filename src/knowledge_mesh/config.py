@@ -486,7 +486,7 @@ class McpSettings(_Base):
     """
 
     mode: Literal["in_process", "streamable_http"] = "in_process"
-    url: str = "http://127.0.0.1:9801/mcp"
+    url: str = "http://127.0.0.1:8000/mcp"
     tools: list[str] = Field(default_factory=lambda: list(MCP_AGENT_TOOLS), min_length=1)
 
     @field_validator("url")

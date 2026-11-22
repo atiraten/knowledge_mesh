@@ -244,7 +244,7 @@ mcp:
                                         # streamable_http: the MCP server is mounted at /mcp in the app (same process,
                                         #   one copy of the data); the harness connects to url, outside MCP clients too.
                                         #   /mcp requires X-API-Key when KNOWLEDGE_MESH_API_KEY is set.
-  url: http://127.0.0.1:9801/mcp        # streamable_http only (scripts/mesh.sh serves on port 9801)
+  url: http://127.0.0.1:8000/mcp        # streamable_http only (scripts/mesh.sh serves on port 8000)
   tools:                                # MCP tools offered to the executor (read-only; no crawl, ingest, catalog, keys)
     - retrieve_documents
     - read_document

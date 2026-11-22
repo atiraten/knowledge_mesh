@@ -14,4 +14,4 @@ scrape_configs:
   - job_name: knowledge-mesh
     metrics_path: /metrics
     static_configs:
-      - targets: ["host.docker.internal:9801"]
+      - targets: ["host.docker.internal:8000"]

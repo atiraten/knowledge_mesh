@@ -133,7 +133,7 @@ Observability stack ($(engine)):
   Prometheus (metrics, rules)     http://localhost:9090
   Alertmanager (alert routing)    http://localhost:9093
   Loki (logs, via Grafana)        http://localhost:3100
-The app must listen on 0.0.0.0:9801 for Prometheus and Alertmanager to reach it (scripts/mesh.sh does this).
+The app must listen on 0.0.0.0:8000 for Prometheus and Alertmanager to reach it (scripts/mesh.sh does this).
 EOF
 }
 

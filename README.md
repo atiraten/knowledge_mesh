@@ -1,18 +1,17 @@
 # Knowledge Mesh
 
-Knowledge Mesh is a proof of concept for answering natural-language questions using documents and structured data. It indexes files and websites, catalogs relational databases, Parquet files, and Databricks sources, and builds an RDF knowledge graph that connects business terms, datasets, columns, and relationships. The search agent can retrieve document passages, traverse the graph, and run read-only SQL against supported database sources to assemble an answer with supporting evidence.
+Knowledge Mesh is a Proof of Concept (PoC) for answering natural-language questions using unstructured information (documents) and structured data. It indexes files and websites, catalogs relational databases, Parquet files, and Databricks sources, and builds an RDF knowledge graph that connects business terms, datasets, columns, and relationships. The search agent can retrieve document passages, traverse the graph, and run read-only SQL against supported database sources to assemble an answer with supporting evidence.
 
 Source tables remain in place. Knowledge Mesh reads rows for profiling, stores metadata and column profiles locally, and can include sample values in term-generation prompts. Parquet sources support cataloging and profiling. SQL execution is available for relational database and Databricks sources.
 
 
 **Knowledge Mesh extracts database metadata while leaving the underlying data in place. No Data movement**
 
-  **Specification:** [doc/knowledge_mesh_requirements.md](doc/knowledge_mesh_requirements.md).
+  **Scope:** [doc/knowledge_mesh_requirements.md](doc/knowledge_mesh_requirements.md).
 
-  **Knowledge Implementation:** [doc/knowledge_graph_graphrag_implementation_requirements.txt](doc/knowledge_graph_graphrag_implementation_requirements.txt).
+  **Knowledge Graph Specifications:** [doc/knowledge_graph_graphrag_implementation_requirements.txt](doc/knowledge_graph_graphrag_implementation_requirements.md).
  
-  **Agent Loop in ASD STE100:** [doc/knowledge_mesh_requirements](doc/knowledge_mesh_requirements).
-
+  **Agent Loop in ASD STE100:** [doc/knowledge_mesh_requirements](doc/knowledge_mesh_requirements.md).
 
 
 ## Quick start
@@ -28,16 +27,33 @@ python3 -m venv .venv
 .venv/bin/python src/harness.py serve           # UI + API on http://127.0.0.1:8000
 .venv/bin/python -m pytest                      # test suite (offline, no model download)
 
-scripts/mesh.sh start                           # observability stack (Podman) + app on http://localhost:9801
+scripts/mesh.sh start                           # observability stack (Podman) + app on http://localhost:8000
 scripts/mesh.sh status | stop | restart         # add --no-observability to leave the stack alone
 scripts/observability.sh up | down | status | logs [service]   # only the observability stack
 ```
 
-**For this POC, the MCP Server is mounted on the web app  http://127.0.0.1:8000/mcp ** 
+**With `mcp.mode: streamable_http`, the MCP server is mounted in the web app at `http://127.0.0.1:8000/mcp`.**
 
-**Model key.** The Gemini models (`term_generation`, `answer_generation` and `agent` in `config/mesh.yaml`)
-read the API key from the `GEMINI_API_KEY` environment variable, or, if it is not set, from
-`config/model.key` (a file holding only the key; it is gitignored and never committed).
+## Example
+**Question:**  list good customers
+
+**Response:**
+Based on the enterprise business definition, a **Good Customer** is defined as "A customer who never had a delinquency or late payment" [K1][B4].
+
+The following 12 active customers meet this definition, having no delinquency records and no payment history with late fees [R1]:
+
+1. **Alice Martin** 
+ - Customer ID: `cafe0001-0000-0000-0000-000000000001` [R1] 
+ - Phone: 212-555-0101 [R1] 
+ - Credit Score: 760 [R1] 
+ - Status: Active [R1]
+
+ .....
+
+ Citations
+- [K1] business definition “Good Customer” source
+- [R1] query result “SQL on Loans”
+
 
 **How the search agent reaches its tools.** The agent harness uses the MCP server's tools only, through
 the MCP protocol. `mcp.mode` in `config/mesh.yaml` picks the connection:
@@ -45,24 +61,11 @@ the MCP protocol. `mcp.mode` in `config/mesh.yaml` picks the connection:
 | `mcp.mode` | Harness connection | `/mcp` endpoint |
 |---|---|---|
 | `in_process` (default) | in-memory MCP client session to the server in the same process | not mounted |
-| `streamable_http` | MCP streamable HTTP to `mcp.url` (default `http://127.0.0.1:9801/mcp`) | mounted in the app process: one copy of the data, indexes, graph and jobs |
+| `streamable_http` | MCP streamable HTTP to `mcp.url` (default `http://127.0.0.1:8000/mcp`) | mounted in the app process: one copy of the data, indexes, graph and jobs |
 
-With `streamable_http`, start the app on the port in `mcp.url` (`scripts/mesh.sh start` serves on 9801; with
-`serve`, pass `--port 9801`). Outside MCP clients can use the same endpoint:
+With `streamable_http`, the harness connects to `mcp.url` in `config/mesh.yaml` (`http://127.0.0.1:8000/mcp`;
+`serve` and `scripts/mesh.sh start` both listen on 8000).
 
-```json
-{"mcpServers": {"knowledge-mesh": {"type": "http", "url": "http://127.0.0.1:9801/mcp",
-  "headers": {"X-API-Key": "<value of KNOWLEDGE_MESH_API_KEY>"}}}}
-```
-
-The `X-API-Key` header is needed only when `KNOWLEDGE_MESH_API_KEY` is set (`/mcp` uses the same key as `/api`).
-Use `127.0.0.1` or `localhost` in the URL. `mcp.tools` lists the MCP tools offered to the executor (read-only
-tools; crawl, ingest, index, catalog and key discovery are not offered).
-
-The first indexing run downloads `sentence-transformers/all-mpnet-base-v2` (~420 MB) into the
-Hugging Face cache; after that embeddings run fully locally (set `embedding.local_files_only: true`
-to forbid any hub access). `src/harness.py` works without installing the package; once installed,
-`knowledge-mesh <command>` is equivalent.
 
 > macOS note: if `import knowledge_mesh` fails after an editable install, macOS may have set the
 > `hidden` flag on `.venv/.../site-packages/*.pth` (Python 3.12+ skips hidden `.pth` files). Run
@@ -81,7 +84,10 @@ src/knowledge_mesh/
   config.py                        load + validate config/mesh.yaml (pydantic, strict keys)
   mesh.py                          orchestrator: every tool operation, callable from Python
   mcp_server.py                    MCP tools (crawl, ingest, index, read, extract, discover keys, retrieve,
-                                   query_knowledge_graph, execute_sql, generate_html)
+                                   query_knowledge_graph, find_datasets, get_dataset, get_business_term,
+                                   get_business_entity, get_business_definition, generate_sql, execute_sql,
+                                   generate_html); the search agent's only tools
+  mcp_evidence.py                  evidence markers on MCP results, compact `view: agent` for the harness
   tool_schemas.py                  published output schemas of the knowledge graph / SQL / HTML MCP tools
   api/app.py, api/static/          FastAPI routes, middleware, browser UI (plain HTML/CSS/JS)
   unstructured/                    loaders (PDF/DOCX/TXT/MD/HTML), document registry, hierarchical
@@ -92,14 +98,16 @@ src/knowledge_mesh/
                                    key_discovery.py, fk_rules.py (FK identifier rules + confidence),
                                    terms.py (LLM business terms), glossary.py, relationships.py (LLM
                                    named relationships, term relations, synonyms), reviews.py
-                                   (verify / reject), sql_exec.py (execute_sql)
+                                   (verify / reject), sql_exec.py (execute_sql), sql_generation.py
+                                   (generate_sql)
   indexing/                        local embeddings, persistent SimpleVectorStore wrapper
   graph/                           RDF vocabulary, layer builders, SHACL-gated graph store,
                                    retriever.py (query_knowledge_graph), view.py (catalog graph view)
   common/html_render.py            generate_html: escaped HTML fragments from content blocks
   retrieval/                       mixed retrieval, Laya reranking, evidence blocks, one-shot answers
-  agent/                           search agent harness: planner, per-intent tool loop, tools, evidence
-                                   ledger, synthesis (prompts/planner.txt, executor.txt, synthesis.txt)
+  agent/                           search agent harness: planner, per-intent tool loop, MCP client
+                                   (mcp_client.py), evidence ledger, synthesis (prompts/planner.txt,
+                                   executor.txt, synthesis.txt)
   definitions.py                   business definitions
   jobs.py                          durable background jobs + paginated manifests
   llm/                             Gemini / OpenAI-compatible clients with tracing + cost metrics
@@ -334,7 +342,7 @@ question -> planner LLM (planner prompt) -> plan
    JSON: an `evaluation` of the latest results, then either
    `{"action": "tools", "tool_calls": [{"tool", "arguments"}, ...]}` (run in parallel, up to
    `agent.max_tool_calls_per_step`) or `{"action": "complete", "status": "answered|partial|not_found",
-   "answer"}`. The harness runs the tools, adds the results to the context and loops, up to
+   "answer"}`. The harness calls the MCP tools (config `mcp`), adds the results to the context and loops, up to
    `agent.max_iterations` (default 20) calls per task. The task's first `retrieve_documents` call always
    searches its planned `retrieval_queries` (the call's `note` shows any the model left out). Invalid
    replies and tool errors are fed back and count as iterations; when the context is full, the oldest
@@ -349,8 +357,9 @@ question -> planner LLM (planner prompt) -> plan
 
 **Knowledge graph, SQL and HTML tools.** The executor also has `query_knowledge_graph` (business entities,
 terms, ranked relationship paths and their joins; see below), `generate_sql` (the agent model writes one
-read-only SELECT from the cited table, join and term evidence with `prompts/sql_generation.txt`; the query is
-checked but not run), `execute_sql` (runs it; rows become `R` evidence for record-level claims) and
+read-only SELECT with `prompts/sql_generation.txt` from the evidence the executor passes: `tables` with their
+columns and keys, `joins` and `facts`; nothing else is looked up; the query is checked but not run),
+`execute_sql` (runs it; rows become `R` evidence for record-level claims) and
 `generate_html` (an escaped HTML fragment, `H` evidence, shown on the Search page; with the "HTML output"
 checkbox, `output_format: "html"`, the executor is told to produce it). A `query_knowledge_graph` call without
 `intent_id`, `intent` or `retrieval_queries` gets them from the current task (noted on the call).
@@ -376,15 +385,16 @@ R query result rows, H HTML fragment.
 The response has `plan` and `plans` (one per version), `decisions` (the evaluation after each batch),
 `tasks` (each run: status, attempt, plan version, steps with their tool calls, result, evidence IDs),
 `answer`, `citations`, `evidence` and `usage`. Without a usable agent model (`agent.enabled: false`, no
-key, or the planner call fails) search falls back to direct retrieval: `mode: "retrieval"` and
+key, or the planner call fails) or when the MCP server is unreachable, search falls back to direct retrieval:
+`mode: "retrieval"` and
 `agent.reason`. `POST /api/retrieve` always runs direct retrieval, and `POST /api/chat` is the
 one-shot answer mode.
 
 ## Knowledge graph retrieval (`query_knowledge_graph`)
 
-One call per planner intent (MCP tool and agent tool; `graph/retriever.py`).
-`retrieve_documents` keeps its signature and behaviour (its graph
-evidence now also lists the proposed relationships and term relations, labelled with their status).
+One call per planner intent (MCP tool; `graph/retriever.py`).
+`retrieve_documents` takes a list of `queries` (plus `expand_parents` and `view`); its result fields are
+unchanged, and its graph evidence lists the proposed relationships and term relations, labelled with their status.
 
 1. **Resolve** each retrieval query: an IRI in the text, then exact / normalized / plural /
    word-order-insensitive matches on labels, synonyms (`skos:altLabel`) and relationship names and
@@ -397,7 +407,7 @@ evidence now also lists the proposed relationships and term relations, labelled 
    both ways (`references` / `isReferencedBy`), document relationships forward only. Rejected edges are
    never used; inferred ones only with `include_inferred_relationships`.
 3. **Rank**: `0.6 × mean edge relevance + 0.25 × join coverage + 0.15 × mean status` (weights in
-   `ranking_weights`). Edge relevance is 1 when the intent names the relationship or a synonym ("bought"),
+   `ranking_weights`). Edge relevance is 1 when the intent names the relationship or a synonym,
    otherwise the local embedding similarity of the intent and the relationship's name, definition and
    synonyms. Join coverage: the foreign key behind the mapping is verified 1, inferred 0.5; an automatic
    mapping 0.5; none 0. Status: verified 1, inferred 0.6, navigational 0.3. Means keep the score
@@ -611,7 +621,7 @@ are the ones in spec §7, plus `/api/retrieve`, `/api/chunks/{id}`, `/api/docume
 `/api/datasets/generate-relationships`, `/api/graph/view` and `/api/graph/reload` (local caller or API key).
 Errors are `{"error": {"code", "message", "details"}, "trace_id"}`. Every response has `X-Trace-Id`.
 Set the env var named by `api.api_key_env` (default `KNOWLEDGE_MESH_API_KEY`) to require
-`X-API-Key` on `/api/*`. The server binds to 127.0.0.1 by default.
+`X-API-Key` on `/api/*` (and on `/mcp` when it is mounted). The server binds to 127.0.0.1 by default.
 
 MCP tools return bounded results with `ok`, `trace_id` and references (`job_id`, `manifest_ref`,
 `/api/...`), and structured errors. `query_knowledge_graph`, `execute_sql` and `generate_html` publish input and
@@ -631,7 +641,7 @@ trace, and `wait_seconds` to block until a job finishes. Local paths must be und
 # once: install Podman (https://podman.io, macOS arm64 installer) and docker-compose (podman compose uses it), then
 podman machine init --cpus 4 --memory 4096   # /opt/podman/bin/podman if it is not on your PATH
 scripts/observability.sh up                 # Podman VM + OTel Collector, Phoenix, Loki, Prometheus, Alertmanager, Grafana
-scripts/mesh.sh start                       # the stack and the app (port 9801, logs in data/logs/server.log)
+scripts/mesh.sh start                       # the stack and the app (port 8000, logs in data/logs/server.log)
 ```
 
 UIs: **Phoenix** http://localhost:6006 (traces, LLM conversations, evaluations, feedback), **Grafana**
@@ -647,7 +657,7 @@ goes away later, the app logs one clear warning per 5 minutes instead of one per
 |---|---|---|
 | Execution tracing | One `agent.search` span per search (`user.id`, `session.id` per browser tab, prompt versions); `agent.plan`, `agent.replan`, one `agent.intent` span per task run linked to the spans of the tasks it depends on; `agent.decision` events (next / replan / finish) and `agent.step` events in order | Phoenix (sessions, trace tree), "open trace in Phoenix" on the Search page |
 | LLM | Provider, model, role (`agent_planner`, `agent_step`, `agent_synthesis`, `agent_judge`, `term_generation`, `term_review`, `term_correction`, …), OpenInference input/output messages and `input.value` / `output.value` (when `capture_sensitive_content` is on; each cut at 20,000 characters), invocation parameters, prompt-file hash, tokens (prompt, answer, thinking as `llm.token_count.completion_details.reasoning`), why the answer ended (`llm.finish_reason`: Gemini `STOP` / `MAX_TOKENS` / `SAFETY`, OpenAI `stop` / `length` / …) and `llm.output_truncated` when it was cut off at `max_output_tokens` (thinking tokens count against it), latency, retries, error type, estimated cost (thinking tokens billed as output). A cut-off answer is also counted (`mesh_llm_truncated_responses`) and logged as "LLM output cut off at max_output_tokens" with token counts, never the text | Phoenix (a job's model calls are in the job's trace: "open trace in Phoenix" on the job page); `mesh_llm_*` metrics |
-| Tools | MCP and agent tools: name, sanitized parameters, status, error code, latency, result size | `agent.tool.*` / `mcp.*` spans; `mesh_tool_calls_total{source}`, `mesh_tool_duration_seconds` |
+| Tools | MCP tools (the agent's tool calls are MCP calls, in the search's trace): name, sanitized parameters, status, error code, latency, result size | `mcp.*` spans; `mesh_tool_calls_total{source}` (`mcp`, or `agent` for calls the harness rejects), `mesh_tool_duration_seconds` |
 | Context | Per executor call: characters and estimated tokens, steps and results shown, results replaced by stubs, truncated results, `seen_before` items, system-prompt version; the agent has no memory across searches | `agent.context` events; `mesh_agent_context_*` |
 | RAG | Queries, retrieved IDs, scores and text, merged-duplicate ratio, Laya decisions; citation coverage and invalid citations; judge faithfulness and context relevance | retrieval spans; `mesh_retrieval_top_score`, `mesh_eval_citation_coverage` |
 | Planning | Plan JSON per version, replan reasons, fallbacks, decisions, the executor's evaluation text (when capture is on) | Phoenix; the Search page; `mesh_agent_plans`, `mesh_agent_recoveries` |
@@ -703,9 +713,9 @@ with the local embedding model, so no separate Ragas key is needed.
 
 - **Knowledge graph / GraphRAG requirements (doc/knowledge_graph_graphrag_implementation_requirements.txt),
   decided with the user:** the document tool was renamed from `retrieve_context` to `retrieve_documents`,
-  as in the spec; new tools have one
-  implementation registered on the MCP server and in the agent tool box; SQL comes from an agent-only
-  `generate_sql` tool using the agent model; `execute_sql` keeps the existing protection (API key, read-only
+  as in the spec; tools are MCP tools only: the harness calls them through the MCP protocol; SQL comes from
+  the MCP tool `generate_sql`, which gets all its evidence from the caller and uses the agent model;
+  `execute_sql` keeps the existing protection (API key, read-only
   session, search scope) plus a sqlglot check, for database and Databricks sources; named relationships, term
   relations and synonyms are LLM proposals made at catalog time by the term model; FK-derived edges are
   navigational; join mappings are explicit + automatic; relevance is aliases + local embeddings; verify /

@@ -7,12 +7,12 @@
 #   scripts/mesh.sh restart [--no-observability]
 #   scripts/mesh.sh status
 #
-# Environment: PORT (default 9801), HOST (default 0.0.0.0, so the containers can scrape /metrics).
+# Environment: PORT (default 8000), HOST (default 0.0.0.0, so the containers can scrape /metrics).
 # The app writes data/run/server.pid and logs to data/logs/server.log.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PORT="${PORT:-9801}"
+PORT="${PORT:-8000}"
 HOST="${HOST:-0.0.0.0}"
 PY="$ROOT/.venv/bin/python"
 RUN_DIR="$ROOT/data/run"

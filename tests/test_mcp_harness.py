@@ -47,11 +47,11 @@ def toolbox(mesh, scope=None):
 
 def test_config_mcp_section_is_validated():
     cfg = load_config(REPO / "config" / "mesh.yaml")
-    assert cfg.mcp.mode == "in_process" and cfg.mcp.url == "http://127.0.0.1:9801/mcp"
+    assert cfg.mcp.mode == "in_process" and cfg.mcp.url == "http://127.0.0.1:8000/mcp"
     assert cfg.mcp.tools == MCP_AGENT_TOOLS and not WRITE_TOOLS & set(cfg.mcp.tools)
 
 
-@pytest.mark.parametrize("mcp, message", [({"mode": "stdio"}, "mode"), ({"url": "127.0.0.1:9801/mcp"}, "http"),
+@pytest.mark.parametrize("mcp, message", [({"mode": "stdio"}, "mode"), ({"url": "127.0.0.1:8000/mcp"}, "http"),
                                           ({"tools": []}, "tools"), ({"port": 1}, "port")])
 def test_bad_mcp_settings_are_rejected(config_factory, mcp, message):
     with pytest.raises((ConfigError, ValueError), match=message):
