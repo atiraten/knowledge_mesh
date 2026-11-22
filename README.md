@@ -26,13 +26,14 @@ python3 -m venv .venv
 .venv/bin/pip install -e ".[google,laya,databases,eval,dev]"   # add ,databricks / ,openai as needed
 .venv/bin/python src/harness.py check-config    # validate config/mesh.yaml
 .venv/bin/python src/harness.py serve           # UI + API on http://127.0.0.1:8000
-.venv/bin/python src/harness.py mcp             # MCP server (stdio)
 .venv/bin/python -m pytest                      # test suite (offline, no model download)
 
 scripts/mesh.sh start                           # observability stack (Podman) + app on http://localhost:9801
 scripts/mesh.sh status | stop | restart         # add --no-observability to leave the stack alone
 scripts/observability.sh up | down | status | logs [service]   # only the observability stack
 ```
+
+**For this POC, the MCP Server is mounted on the web app  http://127.0.0.1:8000/mcp ** 
 
 **Model key.** The Gemini models (`term_generation`, `answer_generation` and `agent` in `config/mesh.yaml`)
 read the API key from the `GEMINI_API_KEY` environment variable, or, if it is not set, from
