@@ -1,6 +1,6 @@
 # Knowledge Mesh
 
-Knowledge Mesh is a Proof of Concept (PoC) for answering natural-language questions using unstructured information (documents) and structured data. It indexes files and websites, catalogs relational databases, Parquet files, and Databricks sources, and builds an RDF knowledge graph that connects business terms, datasets, columns, and relationships. The search agent can retrieve document passages, traverse the graph, and run read-only SQL against supported database sources to assemble an answer with supporting evidence.
+Knowledge Mesh is a Proof of Concept (PoC) for answering natural-language questions using unstructured information (documents) and structured data - chat-with-data assistant. It indexes files and websites, catalogs relational databases, Parquet files, and Databricks sources, and builds an RDF knowledge graph that connects business terms, datasets, columns, and relationships. The search agent can retrieve document passages, traverse the graph, and run read-only SQL against supported database sources to assemble an answer with supporting evidence.
 
 
 **Knowledge Mesh extracts database metadata while leaving the underlying data in place. No Data movement**
