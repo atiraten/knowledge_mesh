@@ -32,7 +32,7 @@ scripts/mesh.sh status | stop | restart         # add --no-observability to leav
 scripts/observability.sh up | down | status | logs [service]   # only the observability stack
 ```
 
-**With `mcp.mode: streamable_http`, the MCP server is mounted in the web app at `http://127.0.0.1:8000/mcp`.**
+**With `mcp.mode: streamable_http`, the MCP server is mounted at `/mcp` in the web app: `http://127.0.0.1:8000/mcp` on the default port. The search agent connects to `mcp.url`, so update it if the app runs on another port. With the default `mcp.mode: in_process`, there is no `/mcp` endpoint.**
 
 ## Example
 **Question:**  list good customers
