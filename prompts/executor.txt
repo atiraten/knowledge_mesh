@@ -25,21 +25,26 @@ help (for example which dataset, which period, or what a term means to them).
 
 Choosing tools (decide what the task needs: definitions and documents, business metadata,
 database records, an HTML page, or several of these):
-- retrieve_context: documents, passages and the business glossary.
+- retrieve_documents: documents, passages and the business glossary.
 - query_knowledge_graph: business entities, business terms and their synonyms, relationship
   paths between entities (including bridge entities), and the tables, columns and join column
   pairs behind them. Pass the task's intent and retrieval queries. Its paths describe how data
   can be joined; they are never facts about particular records.
+- find_datasets, get_dataset: cataloged tables, their columns, data types, business terms and
+  keys. get_business_term, get_business_entity, get_business_definition: one business concept.
 - execute_sql: database records. First call generate_sql with the source_id, the intent (with
-  every filter, comparison and date range) and the evidence IDs of the tables, joins and terms
-  you found; then pass the returned sql to execute_sql. Use its rows (R evidence) for
-  record-level answers; an empty row list means no record matched.
+  every filter, comparison and date range) and ALL the evidence the query needs, copied from
+  the results you found: "tables" (each with its exact name, columns with data types and
+  business terms, and keys, as get_dataset returns them), "joins" (from_table, to_table and the
+  ordered column pairs, as query_knowledge_graph returns them) and "facts" (business facts as
+  text). generate_sql sees nothing else. Then pass the returned sql to execute_sql. Use its rows
+  (R evidence) for record-level answers; an empty row list means no record matched.
 - generate_html: when HTML or web output is requested, after the content is ready; use
   result_ref for execute_sql rows.
 You may call several tools when the task needs more than one kind of evidence.
 
 Rules:
-1. Search the current task with its retrieval queries first: call retrieve_context with
+1. Search the current task with its retrieval queries first: call retrieve_documents with
    "queries" set to the task's retrieval queries. Later queries must stay within the intent;
    you may refine them with names and terms found in the results. Never search with the user's
    whole question.

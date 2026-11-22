@@ -373,13 +373,18 @@ class TermGenerationSettings(LLMSettings):
     language_name: str = "English"
     class_words: list[str] = Field(
         default_factory=lambda: [
-            "Identifier", "Code", "Name", "Description", "Date", "Timestamp", "Amount",
-            "Quantity", "Count", "Number", "Rate", "Percent", "Indicator", "Text", "Type", "Status",
+            "Identifier", "Code", "Name", "Description", "Date", "Timestamp", "Datetime", "Amount", "Code", "Score", "Ratio", "Value",
+            "Quantity", "Count", "Number", "Rate", "Percent", "Indicator", "Flag", "Text", "Type", "Status", "Percent", "Percentage",
+            "address", "line"
         ]
     )
     abbreviations: dict[str, str] = Field(default_factory=dict)
     abbreviations_path: Path | None = None
     max_columns_per_request: int = Field(default=40, ge=1, le=500)
+    # Review of the generated terms (same model); rejected columns are corrected up to max_correction_rounds
+    # times, then left blank. The review is skipped when the prompt file does not exist.
+    correction_prompt_path: Path = Path("./prompts/term_correction.txt")
+    max_correction_rounds: int = Field(default=3, ge=0, le=10)
 
 
 class AnswerGenerationSettings(LLMSettings):
@@ -465,6 +470,33 @@ class ApiSettings(_Base):
     api_key_env: str | None = "KNOWLEDGE_MESH_API_KEY"
 
 
+# Read-only MCP tools offered to the search agent's executor (never crawl, ingest, index, catalog or keys).
+MCP_AGENT_TOOLS = ["retrieve_documents", "read_document", "query_knowledge_graph", "find_datasets", "get_dataset",
+                   "get_business_term", "get_business_entity", "get_business_definition", "generate_sql",
+                   "execute_sql", "generate_html"]
+
+
+class McpSettings(_Base):
+    """How the search agent harness reaches its tools: MCP tools only, through the MCP protocol.
+
+    ``in_process``: an MCP client session to this process's MCP server, in memory.
+    ``streamable_http``: the MCP server is mounted at ``/mcp`` in the FastAPI app (same process: one copy of the
+    data, indexes, graph and jobs); the harness connects to ``url``, and outside MCP clients can use it too.
+    ``tools``: the MCP tools offered to the executor.
+    """
+
+    mode: Literal["in_process", "streamable_http"] = "in_process"
+    url: str = "http://127.0.0.1:9801/mcp"
+    tools: list[str] = Field(default_factory=lambda: list(MCP_AGENT_TOOLS), min_length=1)
+
+    @field_validator("url")
+    @classmethod
+    def _http_url(cls, v: str) -> str:
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("mcp.url must be an http(s) URL")
+        return v
+
+
 class MeshConfig(_Base):
     storage: StorageSettings = Field(default_factory=StorageSettings)
     crawler: CrawlerSettings = Field(default_factory=CrawlerSettings)
@@ -487,6 +519,7 @@ class MeshConfig(_Base):
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
     secrets: SecretsSettings = Field(default_factory=SecretsSettings)
     api: ApiSettings = Field(default_factory=ApiSettings)
+    mcp: McpSettings = Field(default_factory=McpSettings)
 
     base_dir: Path = Field(default_factory=Path.cwd, exclude=True)
 
@@ -527,6 +560,7 @@ class MeshConfig(_Base):
         for llm in (data.term_generation, data.answer_generation, data.agent):
             llm.api_key_file = self.resolve(llm.api_key_file)
         data.term_generation.prompt_path = self.resolve(data.term_generation.prompt_path)
+        data.term_generation.correction_prompt_path = self.resolve(data.term_generation.correction_prompt_path)
         data.agent.planner_prompt_path = self.resolve(data.agent.planner_prompt_path)
         data.agent.executor_prompt_path = self.resolve(data.agent.executor_prompt_path)
         data.agent.synthesis_prompt_path = self.resolve(data.agent.synthesis_prompt_path)

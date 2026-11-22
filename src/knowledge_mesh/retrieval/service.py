@@ -63,7 +63,7 @@ class RetrievalService:
         metrics = get_metrics()
         start = time.perf_counter()
         reranking: dict[str, Any] | None = None
-        with span("retrieval.retrieve_context", "RETRIEVER",
+        with span("retrieval.retrieve_documents", "RETRIEVER",
                   {"input.value": query[:500], "retrieval.top_k": k, "retrieval.evidence_types": types}) as sp:
             documents: list[dict[str, Any]] = []
             if "documents" in types:
@@ -190,11 +190,14 @@ class RetrievalService:
                            "graph": len(r["graph_evidence"])} for q, r in zip(qs, results)],
             "insufficient_evidence": insufficient, "trace_id": trace_id,
         }
-        reranking = [{"query": q, "outcome": r["reranking"].get("outcome"), "message": r["reranking"].get("message")}
+        # Laya decisions per query, with the passage it selected (``response``)
+        reranking = [{"query": q, **r["reranking"], "response": r.get("response")}
                      for q, r in zip(qs, results) if r.get("reranking")]
         if reranking:
             response["reranking"] = reranking
-        if insufficient:
+        if len(results) == 1 and results[0].get("message"):  # one query: its own message (e.g. Laya's no-response)
+            response["message"] = results[0]["message"]
+        elif insufficient:
             response["message"] = ("No indexed passage, glossary entry or graph evidence is relevant enough "
                                    "to these queries; no sources are cited.")
         return response
@@ -292,15 +295,16 @@ class RetrievalService:
                 continue
             md = hit.node.metadata
             is_term = md.get("record_type") == "business_term"
-            description = None
-            if is_term:
-                row = self.db.query_one("SELECT term_description FROM columns WHERE column_id = ?", (md["column_id"],))
-                description = row["term_description"] if row else None
+            # current label and description from the business glossary (the indexed text can be older)
+            row = self.db.query_one(f"SELECT label, description FROM {'business_terms' if is_term else 'business_entities'}"
+                                    " WHERE slug = ? AND deleted = 0", (md.get("slug"),))
+            if row is None:
+                continue  # deleted from the business glossary since it was indexed
             out.append({
                 "rank": len(out) + 1,
                 "type": md.get("record_type"),
-                "label": md.get("label"),
-                "description": description,
+                "label": row["label"],
+                "description": row["description"],
                 "score": round(score, 4),
                 "score_type": "cosine_similarity",
                 "catalog_ref": md.get("catalog_ref"),
@@ -310,7 +314,7 @@ class RetrievalService:
                 "column_id": md.get("column_id") or None,
                 "column": md.get("column") or None,
                 "graph_ref": md.get("graph_ref"),
-                "source_ref": f"/api/datasets/{md.get('dataset_id')}",
+                "source_ref": f"/api/datasets/{md['dataset_id']}" if md.get("dataset_id") else None,
                 "ref": f"/api/business-{'terms' if is_term else 'entities'}/{md.get('slug')}",
             })
         return out

@@ -228,6 +228,30 @@ CREATE TABLE IF NOT EXISTS definition_links (
     PRIMARY KEY (definition_id, target_type, target_slug)
 );
 
+-- Business glossary: one row per term / entity. columns.term_slug and datasets.entity_slug reference them.
+-- origin: generated | document | manual | edited; deleted = 1 is a tombstone (never re-created by generation).
+CREATE TABLE IF NOT EXISTS business_terms (
+    slug TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    description TEXT,
+    sensitive INTEGER,
+    origin TEXT NOT NULL,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT,
+    updated_at TEXT,
+    updated_by TEXT
+);
+CREATE TABLE IF NOT EXISTS business_entities (
+    slug TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    description TEXT,
+    origin TEXT NOT NULL,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT,
+    updated_at TEXT,
+    updated_by TEXT
+);
+
 CREATE TABLE IF NOT EXISTS doc_entity_mentions (
     document_id TEXT NOT NULL,
     chunk_id TEXT NOT NULL,
@@ -423,6 +447,8 @@ CREATE TABLE IF NOT EXISTS ops_alerts (
 ADDED_COLUMNS = [
     ("column_profiles", "type_category", "TEXT"),  # generic type from profiling: string, integer, decimal, date, ...
     ("columns", "term_sensitive", "INTEGER"),  # 1 = the business term can identify a person; NULL = not assessed
+    ("business_definitions", "document_id", "TEXT"),  # the policy document where the definition is defined
+    ("business_definitions", "location", "TEXT"),     # page or section in that document
 ]
 
 

@@ -63,12 +63,12 @@ def rr_mesh(mesh_factory, config_factory):
 def test_selects_passage_over_threshold_rated_acceptable(rr_mesh):
     agent = FakeLaya(favour={"identifier": 30.0}, quality={"identifier": "Clear"})
     mesh = rr_mesh(agent)
-    res = mesh.retrieve_context("how is a customer identified")
-    rr = res["reranking"]
+    res = mesh.retrieve_documents(["how is a customer identified"])
+    rr = res["reranking"][0]  # Laya decisions per query
     assert rr["applied"] and rr["outcome"] == "selected" and rr["calls"] == 2 and rr["candidates"] == 3
     assert len(res["results"]) == 1 and "unique identifier" in res["results"][0]["text"]
     assert res["results"][0]["rerank"]["quality"] == "Clear" and res["results"][0]["rerank"]["choice_probability"] > 0.8
-    assert res["response"]["found"] and res["response"]["chunk_id"] == res["results"][0]["chunk_id"]
+    assert res["reranking"][0]["response"]["found"] and res["reranking"][0]["response"]["chunk_id"] == res["results"][0]["chunk_id"]
     kind, state, questions, kw = agent.calls[0]
     assert state == {"question": "how is a customer identified"}
     assert questions["description"]["type"] == "choice"
@@ -82,17 +82,17 @@ def test_selects_passage_over_threshold_rated_acceptable(rr_mesh):
 def test_no_passage_over_threshold_means_no_response_and_one_call(rr_mesh):
     agent = FakeLaya(favour={"identifier": 1.0, "parcels": 1.0, "invoices": 1.0}, quality={})
     mesh = rr_mesh(agent)
-    res = mesh.retrieve_context("how is a customer identified")
-    assert res["reranking"]["outcome"] == "no_response" and res["reranking"]["calls"] == 1
-    assert res["results"] == [] and res["response"] == {"found": False, "text": "I could not find a response."}
+    res = mesh.retrieve_documents(["how is a customer identified"])
+    assert res["reranking"][0]["outcome"] == "no_response" and res["reranking"][0]["calls"] == 1
+    assert res["results"] == [] and res["reranking"][0]["response"] == {"found": False, "text": "I could not find a response."}
     assert res["message"] == "I could not find a response."
-    assert all(not d["passed_probability"] for d in res["reranking"]["decisions"])
+    assert all(not d["passed_probability"] for d in res["reranking"][0]["decisions"])
 
 
 def test_quality_below_acceptable_means_no_response(rr_mesh):
     agent = FakeLaya(favour={"identifier": 30.0}, quality={"identifier": "Ambiguous"})
-    res = rr_mesh(agent).retrieve_context("how is a customer identified")
-    rr = res["reranking"]
+    res = rr_mesh(agent).retrieve_documents(["how is a customer identified"])
+    rr = res["reranking"][0]  # Laya decisions per query
     assert rr["outcome"] == "no_response" and rr["calls"] == 2 and res["results"] == []
     top = rr["decisions"][0]
     assert top["passed_probability"] and top["quality"] == "Ambiguous" and top["acceptable"] is False
@@ -101,8 +101,8 @@ def test_quality_below_acceptable_means_no_response(rr_mesh):
 def test_top_two_scored_in_one_call_and_best_quality_wins(rr_mesh):
     agent = FakeLaya(favour={"identifier": 5.0, "parcels": 4.0, "invoices": 0.05},
                      quality={"identifier": "Acceptable", "parcels": "Excellent"})
-    res = rr_mesh(agent, reranker={"min_probability": 0.3}).retrieve_context("customer")
-    rr = res["reranking"]
+    res = rr_mesh(agent, reranker={"min_probability": 0.3}).retrieve_documents(["customer"])
+    rr = res["reranking"][0]  # Laya decisions per query
     passed = [d for d in rr["decisions"] if d["passed_probability"]]
     assert len(passed) == 2 and rr["calls"] == 2
     assert len(agent.calls[1][1]) == 2  # both shortlisted passages in the single quality call
@@ -112,24 +112,24 @@ def test_top_two_scored_in_one_call_and_best_quality_wins(rr_mesh):
 
 def test_candidate_text_is_bounded(rr_mesh):
     agent = FakeLaya(favour={"identifier": 30.0}, quality={"identifier": "Clear"})
-    rr_mesh(agent, reranker={"max_candidate_chars": 60}).retrieve_context("customer identifier")
+    rr_mesh(agent, reranker={"max_candidate_chars": 60}).retrieve_documents(["customer identifier"])
     assert all(len(t) <= 60 for t in agent.calls[0][2]["description"]["criteria"].values())
 
 
 def test_reranker_failure_keeps_similarity_order(rr_mesh):
-    res = rr_mesh(FakeLaya({}, {}, fail=True)).retrieve_context("customer identifier")
-    assert res["reranking"]["applied"] is False and res["reranking"]["outcome"] == "failed"
-    assert "model crashed" in res["reranking"]["error"] and len(res["results"]) == 3
-    assert "response" not in res
+    res = rr_mesh(FakeLaya({}, {}, fail=True)).retrieve_documents(["customer identifier"])
+    assert res["reranking"][0]["applied"] is False and res["reranking"][0]["outcome"] == "failed"
+    assert "model crashed" in res["reranking"][0]["error"] and len(res["results"]) == 3
+    assert res["reranking"][0]["response"] is None
 
 
 def test_per_request_override(rr_mesh):
     agent = FakeLaya(favour={"identifier": 30.0}, quality={"identifier": "Clear"})
     mesh = rr_mesh(agent, enabled=False)
-    assert "reranking" not in mesh.retrieve_context("customer identifier")
-    assert mesh.retrieve_context("customer identifier", rerank=True)["reranking"]["applied"]
+    assert "reranking" not in mesh.retrieve_documents(["customer identifier"])
+    assert mesh.retrieve_documents(["customer identifier"], rerank=True)["reranking"][0]["applied"]
     mesh2 = rr_mesh(FakeLaya({}, {}), enabled=True)
-    assert "reranking" not in mesh2.retrieve_context("customer identifier", rerank=False)
+    assert "reranking" not in mesh2.retrieve_documents(["customer identifier"], rerank=False)
 
 
 def test_answer_mode_uses_selected_passage_or_says_not_found(rr_mesh):
@@ -159,13 +159,13 @@ def test_laya_ranks_leaf_chunks_and_the_selected_chunk_gets_its_parents(rr_mesh)
     agent = FakeLaya({"rule": 30.0}, {"rule": "Clear"})
     mesh = rr_mesh(agent, reranker={"min_probability": 0.1})  # several guide chunks tie
     mesh.ingest_document(content=GUIDE.encode(), filename="guide.md", wait_seconds=30)
-    res = mesh.retrieve_context("customers place orders", top_k=5, evidence_types=["documents"])
+    res = mesh.retrieve_documents(["customers place orders"], top_k=5, evidence_types=["documents"])
     candidates = agent.calls[0][2]["description"]["criteria"].values()
     leaves = _leaf_texts(mesh)
     assert all(text in leaves for text in candidates)  # whole leaf chunks, never parent text
     assert all(text in leaves for text in (s["chosen_response"] for s in agent.calls[1][1]))
     chosen = res["results"][0]
-    assert res["reranking"]["outcome"] == "selected" and chosen["text"] in leaves
+    assert res["reranking"][0]["outcome"] == "selected" and chosen["text"] in leaves
     assert [p["level"] for p in chosen["parents"]] == [1, 0]
     assert all(len(p["text"]) > len(chosen["text"]) for p in chosen["parents"])
 
@@ -196,5 +196,5 @@ def test_search_api_returns_reranking(rr_mesh):
     mesh = rr_mesh(FakeLaya({"identifier": 30.0}, {"identifier": "Clear"}))
     with TestClient(create_app(mesh)) as c:
         body = c.post("/api/search", json={"query": "customer identifier", "rerank": True}).json()
-        assert body["reranking"]["outcome"] == "selected" and body["response"]["found"]
+        assert body["reranking"][0]["outcome"] == "selected" and body["reranking"][0]["response"]["found"]
         assert c.get("/api/health").json()["checks"]["reranker"]["enabled"] is True

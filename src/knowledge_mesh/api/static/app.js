@@ -76,8 +76,8 @@ function showError(container, err) {
 
 // ---------------------------------------------------------------- router
 const routes = {
-  search: renderSearch, documents: renderDocuments, document: renderDocument, chunk: renderChunk,
-  crawl: renderCrawl, catalog: renderCatalog, dataset: renderDataset, term: renderTerm, entity: renderEntity,
+  search: renderSearch, ingestion: renderIngestion, document: renderDocument, chunk: renderChunk,
+  catalog: renderCatalog, dataset: renderDataset, term: renderTerm, entity: renderEntity,
   kg: renderKnowledgeGraph,
   definitions: renderDefinitions, definition: renderDefinition, jobs: renderJobs, job: renderJob,
   settings: renderSettings,
@@ -95,23 +95,12 @@ function route() {
   const arg = rest.map(decodeURIComponent).join("/");
   document.querySelectorAll("header a[data-tab]").forEach(a => a.classList.toggle("active", a.dataset.tab === name ||
     ((name === "dataset" || name === "kg") && a.dataset.tab === "catalog") || (name === "job" && a.dataset.tab === "jobs") ||
-    (name === "definition" && a.dataset.tab === "definitions") || (name === "document" && a.dataset.tab === "documents")));
+    (["definition", "term", "entity"].includes(name) && a.dataset.tab === "definitions") ||
+    (name === "document" && a.dataset.tab === "ingestion")));
   if (!(CATALOG_ROUTES.has(name) && view.querySelector(".catalog-layout"))) view.replaceChildren();
   (routes[name] || renderSearch)(arg).catch(err => showError(view.querySelector(".catalog-main") || view, err));
 }
 window.addEventListener("hashchange", route);
-
-async function loadHealth() {
-  try {
-    const h = await api("GET", "/api/health");
-    const c = h.checks;
-    document.getElementById("health").textContent =
-      `${h.status} · docs index v${fmt(c.document_index.version)} · graph ${c.knowledge_graph.triples} triples · ` +
-      `terms ${c.term_generation.available ? "on" : "off"} · agent ${c.agent && c.agent.enabled ? "on" : "off"}` +
-      (c.observability && c.observability.online_judge ? " · judge on" : "") +
-      (c.observability && c.observability.capture_sensitive_content ? " · ⚠ prompts captured in traces" : "");
-  } catch (e) { document.getElementById("health").textContent = "health unavailable"; }
-}
 
 // ---------------------------------------------------------------- search (agent harness)
 async function renderSearch() {
@@ -426,20 +415,19 @@ function renderEvidence(data) {
         " ", el("span", { class: "mono muted" }, k.graph_ref))));
   }
   const wrap = el("div");
-  if (data.reranking) wrap.append(renderReranking(data));
+  for (const rr of data.reranking || []) wrap.append(renderReranking(rr));  // Laya decisions, one entry per query
   if (data.insufficient_evidence) wrap.append(el("div", { class: "panel" }, el("strong", {}, "Insufficient evidence. "), data.message));
   wrap.append(el("div", { class: "grid3" }, docs, gl, kg),
     el("div", { class: "small mono muted" }, `trace ${fmt(data.trace_id)}`));
   return wrap;
 }
 
-function renderReranking(data) {
-  const rr = data.reranking;
+function renderReranking(rr) {
   if (!rr.applied) {
     return el("div", { class: "panel" }, badge("Laya reranking unavailable", "warn"),
       el("span", { class: "small muted" }, ` ${rr.error || ""} — passages are in similarity order.`));
   }
-  const resp = data.response || { found: false, text: rr.message };
+  const resp = rr.response || { found: false, text: rr.message };
   const head = el("div", { class: "row" }, el("h2", { style: "margin:0" }, "Response"),
     resp.found ? badge("selected by Laya", "ok") : badge("no acceptable response", "bad"),
     el("span", { class: "small muted" }, `${rr.calls} Laya call(s) · ${rr.latency_ms} ms · ` +
@@ -457,7 +445,26 @@ function renderReranking(data) {
       el("table", {}, el("tr", {}, ["Retrieved", "Choice probability", "Quality", ""].map(h => el("th", {}, h))), rows)) : null);
 }
 
-// ---------------------------------------------------------------- documents
+// ---------------------------------------------------------------- document ingestion
+// One menu entry with two tabs, each with its own address: #ingestion/documents (uploads, inbox directory, the
+// ingested documents) and #ingestion/urls (website crawl). #ingestion alone opens the last tab used in this browser.
+const INGESTION_TABS = { documents: { label: "Documents", render: renderDocuments }, urls: { label: "URLs", render: renderCrawl } };
+async function renderIngestion(arg) {
+  let tab = arg;
+  if (!INGESTION_TABS[tab]) {
+    let last = null;
+    try { last = localStorage.getItem("meshIngestionTab"); } catch (e) { /* storage blocked */ }
+    tab = INGESTION_TABS[last] ? last : "documents";
+    history.replaceState(null, "", `#ingestion/${tab}`);
+  }
+  try { localStorage.setItem("meshIngestionTab", tab); } catch (e) { /* storage blocked */ }
+  view.append(el("h1", {}, "Document Ingestion"),
+    el("div", { class: "tabs", role: "tablist", "aria-label": "Document ingestion" },
+      Object.entries(INGESTION_TABS).map(([key, t]) => el("a", { href: `#ingestion/${key}`, role: "tab",
+        class: key === tab ? "tab active" : "tab", "aria-selected": key === tab ? "true" : "false" }, t.label))));
+  await INGESTION_TABS[tab].render();
+}
+
 async function renderDocuments() {
   const file = el("input", { type: "file", accept: ".pdf,.docx,.txt,.md,.html,.htm" });
   const idx = el("input", { type: "checkbox", checked: true });
@@ -487,7 +494,7 @@ async function renderDocuments() {
     list.replaceChildren(el("table", {}, el("tr", {}, ["Document", "Source", "Status", "Leaf chunks", "Updated", ""].map(h => el("th", {}, h))), rows),
       el("p", { class: "small muted" }, `${data.total} documents`));
   }
-  view.append(el("h1", {}, "Documents"),
+  view.append(
     el("div", { class: "panel" }, el("h2", {}, "Upload"), el("div", { class: "row" }, file,
       el("label", { style: "margin:0" }, idx, " index after upload"), el("button", { onclick: upload }, "Upload")),
       el("p", { class: "small muted" }, "PDF, DOCX, TXT, Markdown or HTML. Size and type limits are enforced by the server."),
@@ -525,7 +532,7 @@ async function renderChunk(id) {
       el("div", { class: "excerpt small" }, p.text))));
 }
 
-// ---------------------------------------------------------------- crawl
+// URLs tab of Document Ingestion: website crawl.
 async function renderCrawl() {
   const url = el("input", { type: "url", placeholder: "https://example.com/" });
   const depth = el("input", { type: "number", min: 1, max: 10, value: 3, style: "width:80px" });
@@ -536,7 +543,7 @@ async function renderCrawl() {
       location.hash = `#job/${r.job_id}`;
     } catch (err) { toast(err.message, true); }
   };
-  view.append(el("h1", {}, "Crawl a website"), el("div", { class: "panel" },
+  view.append(el("div", { class: "panel" },
     el("label", {}, "Start URL (crawl stays on this hostname unless other hosts are allowlisted)"), url,
     el("div", { class: "row" }, el("label", {}, "Max depth (1 = this page only)"), depth, el("label", {}, "Max pages"), pages,
       el("button", { onclick: submit }, "Start crawl")),
@@ -549,7 +556,8 @@ async function renderCrawl() {
 //   #catalog                            overview of the sources
 //   #catalog/db/<source>                a database: its description and its schemas in a grid
 //   #catalog/schema/<source>/<schema>   a schema: its tables and their business entity in a grid
-//   #dataset/<dataset_id>               a table: its columns in a grid, then its keys and relationships
+//   #dataset/<dataset_id>               a table, Dataset Metadata tab: its columns in a grid, then its keys and relationships
+//   #dataset/<dataset_id>/profile       a table, Profile tab: its column profiles
 //   #kg/<source|schema|table>/...       the knowledge graph of a database, schema or table
 // Right-click (or the context-menu key / Shift+F10 on a focused item) opens the knowledge graph of that element.
 let catalogTree = null;  // { layout, items: Map(key -> tree item), sources: Map, datasets: Map } of the shown facet
@@ -865,29 +873,62 @@ async function relationshipsPanel(d, reload) {
   return panel;
 }
 
-async function renderDataset(id) {
+// Two tabs, each with its own address: #dataset/<id> (Dataset Metadata) and #dataset/<id>/profile (Profile).
+const DATASET_TABS = { metadata: "Dataset Metadata", profile: "Profile" };
+async function renderDataset(arg) {
+  const [id, tab] = arg.split("/");
   const pane = await catalogShell(["table", id]);
-  if (pane) await datasetPane(pane, id);
+  if (pane) await datasetPane(pane, id, DATASET_TABS[tab] ? tab : "metadata");
 }
 
-// Table: its columns in a grid, then the table details, column profiles, keys and relationships.
-async function datasetPane(pane, id) {
+// Table, Dataset Metadata tab: its columns in a grid, then the table details, keys and relationships.
+// Profile tab: the column profiles of the last profiling run.
+async function datasetPane(pane, id, tab) {
   const reload = () => {
     const fresh = el("div", { class: "catalog-pane" });
     pane.replaceWith(fresh);
-    datasetPane(fresh, id).catch(err => showError(fresh, err));
+    datasetPane(fresh, id, tab).catch(err => showError(fresh, err));
   };
   const d = await api("GET", `/api/datasets/${encodeURIComponent(id)}`);
   const act = async (path, body) => {
     try { const r = await api("POST", path, body); location.hash = `#job/${r.job_id}`; } catch (err) { toast(err.message, true); }
   };
+  pane.append(el("div", { class: "row", style: "margin-bottom:10px" }, el("h2", { style: "margin:0" }, d.name),
+      el("span", { class: "mono muted" }, d.catalog_ref)),
+    el("div", { class: "tabs", role: "tablist", "aria-label": `Table ${d.name}` },
+      Object.entries(DATASET_TABS).map(([key, label]) => el("a", {
+        href: key === "metadata" ? `#dataset/${d.dataset_id}` : `#dataset/${d.dataset_id}/${key}`, role: "tab",
+        class: key === tab ? "tab active" : "tab", "aria-selected": key === tab ? "true" : "false" }, label))));
+  // Business term cell: the term and its sensitive flag, then its review status and buttons on one line below.
   const termCell = c => c.business_term
-    ? [el("a", { href: `#term/${c.business_term.slug}`, title: c.business_term.description || null }, c.business_term.label), " ",
-       sensitiveTag(c.business_term.sensitive), statusTag(c.business_term.status),
-       reviewButtons("term_mapping", c.column_id, c.business_term.status, reload)]
+    ? [el("div", {}, el("a", { href: `#term/${c.business_term.slug}`, title: c.business_term.description || null }, c.business_term.label),
+         " ", sensitiveTag(c.business_term.sensitive)),
+       el("div", { class: "term-review" }, statusTag(c.business_term.status),
+         reviewButtons("term_mapping", c.column_id, c.business_term.status, reload))]
     : el("span", { class: "small muted" }, c.business_term_error || "—");
   const formats = p => p && p.format_patterns.length
     ? p.format_patterns.slice(0, 3).map(f => el("div", { class: "mono" }, `${f.pattern} (${f.count})`)) : "—";
+  const profiled = d.columns.filter(c => c.profile);
+  if (tab === "profile") {
+    const first = profiled.length ? profiled[0].profile : null;
+    const sampled = first && d.row_count !== null && d.row_count !== undefined && first.row_count < d.row_count;
+    const rows = d.columns.map(c => {
+      const p = c.profile;
+      return [el("span", { class: "mono" }, c.name), fmt(p && p.type_category), c.nullable === null ? "—" : c.nullable ? "yes" : "no",
+        p ? fmt(p.row_count) : "—", p ? fmt(p.distinct_count) : "—", p ? fmt(p.null_count) : "—", p ? fmt(p.empty_count) : "—",
+        formats(p), fmt(p && p.content_type),
+        p && p.most_common_values.length ? el("span", { class: "small" }, p.most_common_values.map(v => `${v.value} (${v.count})`).join(", ")) : "—"];
+    });
+    pane.append(el("div", { class: "panel" },
+      el("div", { class: "row" },
+        el("span", { class: "small muted" }, first
+          ? `${fmt(first.row_count)} rows profiled${sampled ? ` of ${fmt(d.row_count)} (sample)` : ""} · profiling run ${first.run_id}`
+          : "Not profiled yet: Discover keys profiles the table."),
+        el("button", { class: "secondary", onclick: () => act("/api/datasets/discover-keys", { dataset_ids: [d.dataset_id] }) }, "Discover keys")),
+      grid(["Column", "Data type", "Nullable", "Rows", "Distinct", "Nulls", "Empty or blank", "Data format", "Content type",
+        "Most common values"], rows, `Profile of ${d.name}`)));
+    return;
+  }
   const columnGrid = grid(["Column name", "Data type", "Column data type", "Content type", "Data format", "Business term"],
     d.columns.map(c => {
       const p = c.profile;
@@ -895,22 +936,15 @@ async function datasetPane(pane, id) {
         el("td", { class: "mono" }, fmt(c.data_type)), el("td", {}, fmt(p && p.content_type)), el("td", {}, formats(p)),
         el("td", {}, termCell(c)));
     }), `Columns of ${d.name}`);
-  const profiled = d.columns.filter(c => c.profile);
   const gridNote = !profiled.length
     ? "Data type, content type and data format come from profiling: run Discover keys."
     : profiled.some(c => !c.profile.type_category) ? "Data type is filled in by the next Discover keys run." : null;
-  const colProfiles = d.columns.map(c => {
-    const p = c.profile;
-    return [el("span", { class: "mono" }, c.name), c.nullable === null ? "—" : c.nullable ? "yes" : "no",
-      p ? fmt(p.row_count) : "—", p ? fmt(p.distinct_count) : "—", p ? fmt(p.null_count) : "—", p ? fmt(p.empty_count) : "—",
-      p && p.most_common_values.length ? el("span", { class: "small" }, p.most_common_values.map(v => `${v.value} (${v.count})`).join(", ")) : "—"];
-  });
   // Inferred FKs: confidence from the current business terms (high = same term, medium = same name, low = values only).
   const confBadge = c => c ? el("span", { title: (c.reasons || []).join("\n") },
     badge(`${c.level} confidence`, { high: "ok", medium: "info", low: "warn" }[c.level])) : null;
   const keyRow = k => el("tr", {},
     el("td", {}, badge(k.key_type), k.origin === "declared" ? badge("declared", "ok") : badge("inferred", "warn"),
-      k.primary_key_candidate ? badge("PK candidate", "info") : null, confBadge(k.confidence),
+      k.origin === "inferred" && k.primary_key_candidate ? badge("PK candidate", "info") : null, confBadge(k.confidence),
       k.key_type === "foreign" && k.origin === "inferred" ? [statusTag(k.status), reviewButtons("foreign_key", k.key_id, k.status, reload)] : null,
       k.confidence ? el("div", { class: "small muted" }, k.confidence.reasons.join("; ")) : null),
     el("td", { class: "mono" }, k.columns.join(", ")),
@@ -918,8 +952,7 @@ async function datasetPane(pane, id) {
       el("div", { class: "small mono" }, (k.mapping || []).map(m => `${m.from}→${m.to}`).join(", "))] : "—"),
     el("td", { class: "small muted" }, k.scope ? `${k.scope.rows_evaluated ?? ""} rows${k.scope.sampled ? " (sample)" : ""} · run ${k.profiling_run_id}` : "source constraint"));
   pane.append(
-    el("div", { class: "panel" },
-      el("div", { class: "row" }, el("h2", { style: "margin:0" }, d.name), el("span", { class: "mono muted" }, d.catalog_ref)),
+    el("div", { class: "panel" }, el("h3", { style: "margin-top:0" }, "Columns"),
       columnGrid, gridNote ? el("p", { class: "small muted", style: "margin:6px 0 0" }, gridNote) : null),
     el("div", { class: "panel" }, el("h3", { style: "margin-top:0" }, "Table details"), el("div", { class: "row" },
       badge(d.kind), d.business_entity ? [el("a", { href: `#entity/${d.business_entity.slug}` }, badge(`entity: ${d.business_entity.label}`, "ok")),
@@ -930,8 +963,6 @@ async function datasetPane(pane, id) {
       el("div", { class: "row", style: "margin-top:8px" },
         el("button", { onclick: () => act("/api/datasets/discover-keys", { dataset_ids: [d.dataset_id] }) }, "Discover keys"),
         el("button", { class: "secondary", onclick: () => act("/api/datasets/generate-terms", { dataset_ids: [d.dataset_id], force: true }) }, "Regenerate terms"))),
-    el("details", { class: "panel" }, el("summary", {}, "Column profiles"),
-      grid(["Column", "Nullable", "Rows", "Distinct", "Nulls", "Empty", "Most common values"], colProfiles, `Column profiles of ${d.name}`)),
     el("div", { class: "panel" }, el("h2", { style: "margin-top:0" }, "Keys"), d.keys.length ? el("table", {},
       el("tr", {}, ["Type", "Columns", "References", "Provenance"].map(h => el("th", {}, h))), d.keys.map(keyRow)) : el("p", { class: "muted" }, "No keys recorded."),
       d.referenced_by.length ? [el("h3", {}, "Referenced by"), el("table", {}, d.referenced_by.map(k => el("tr", {},
@@ -941,23 +972,65 @@ async function datasetPane(pane, id) {
   pane.append(await relationshipsPanel(d, reload));
 }
 
+// A business term (Business Glossary tab): label, description, sensitive flag; Edit and Delete.
 async function renderTerm(slug) {
   const t = await api("GET", `/api/business-terms/${encodeURIComponent(slug)}`);
-  view.append(el("h1", {}, t.label || slug, " ", sensitiveTag(t.sensitive)), el("div", { class: "panel" }, el("div", { class: "mono muted" }, t.graph_ref),
-    el("h2", {}, "Columns"), el("table", {}, el("tr", {}, ["Column", "Dataset", "Description", "Decoding"].map(h => el("th", {}, h))),
-      t.columns.map(c => el("tr", {}, el("td", { class: "mono" }, c.catalog_ref), el("td", {}, el("a", { href: `#dataset/${c.dataset_id}` }, c.dataset)),
-        el("td", {}, fmt(c.term_description)), el("td", { class: "small muted" }, fmt(c.term_explanation))))),
-    t.definitions.length ? [el("h2", {}, "Definitions"), el("ul", {}, t.definitions.map(x => el("li", {}, el("a", { href: `#definition/${x.definition_id}` }, x.name))))] : null),
+  const details = el("div", { class: "panel" });
+  const showDetails = () => details.replaceChildren(
+    el("div", { class: "answer" }, t.description || el("span", { class: "muted" }, "No description.")),
+    propertyTable({ Sensitive: t.sensitive === null ? "not assessed" : (t.sensitive ? "yes: can identify a person" : "no"),
+      Origin: t.origin, Updated: t.updated_at, "Updated by": t.updated_by, "Graph ref": t.graph_ref }),
+    el("div", { style: "margin-top:10px" },
+      el("button", { onclick: () => details.replaceChildren(el("h2", {}, "Edit business term"),
+        termForm(t, async values => { await api("PUT", t.ref, values); toast(`Saved ${values.label}`); route(); }, showDetails)) }, "Edit"),
+      el("button", { class: "danger", onclick: async () => {
+        if (!confirm(`Delete the business term "${t.label}"? Its ${t.columns.length} column(s) lose the term.`)) return;
+        try { await api("DELETE", t.ref); toast(`Deleted ${t.label}`); location.hash = "#definitions/glossary"; }
+        catch (err) { showBlocked(details, err); }
+      } }, "Delete")));
+  view.append(backLink("glossary"), el("h1", {}, t.label, " ", sensitiveTag(t.sensitive)), details,
+    el("div", { class: "panel" }, el("h2", {}, `Columns (${t.columns.length})`), t.columns.length
+      ? el("table", {}, el("tr", {}, ["Column", "Dataset", "Decoding"].map(h => el("th", {}, h))),
+          t.columns.map(c => el("tr", {}, el("td", { class: "mono" }, c.catalog_ref),
+            el("td", {}, el("a", { href: `#dataset/${c.dataset_id}` }, c.dataset)), el("td", { class: "small muted" }, fmt(c.term_explanation)))))
+      : el("p", { class: "muted" }, "Not bound to a column.")),
+    el("div", { class: "panel" }, el("h2", {}, "Business definitions"), t.definitions.length
+      ? el("ul", {}, t.definitions.map(x => el("li", {}, el("a", { href: `#definition/${encodeURIComponent(x.definition_id)}` }, x.name))))
+      : el("p", { class: "muted" }, "None.")),
     graphPanel(t.graph));
+  showDetails();
 }
 
+// A business entity (Business Entities tab): label and description; Edit and Delete (removes it everywhere).
 async function renderEntity(slug) {
   const e = await api("GET", `/api/business-entities/${encodeURIComponent(slug)}`);
-  view.append(el("h1", {}, e.label), el("div", { class: "panel" }, el("div", { class: "mono muted" }, e.graph_ref),
-    el("h2", {}, "Datasets"), e.datasets.length ? el("ul", {}, e.datasets.map(d => el("li", {}, el("a", { href: `#dataset/${d.dataset_id}` }, d.catalog_ref)))) : el("p", { class: "muted" }, "None"),
-    el("h2", {}, "Document mentions"), e.document_mentions.length ? el("ul", {}, e.document_mentions.map(m => el("li", {}, el("a", { href: `#chunk/${m.chunk_id}` }, m.chunk_id), " in ", el("a", { href: `#document/${m.document_id}` }, m.document_id)))) : el("p", { class: "muted" }, "None"),
-    e.definitions.length ? [el("h2", {}, "Definitions"), el("ul", {}, e.definitions.map(x => el("li", {}, el("a", { href: `#definition/${x.definition_id}` }, x.name))))] : null),
+  const details = el("div", { class: "panel" });
+  const showDetails = () => details.replaceChildren(
+    el("div", { class: "answer" }, e.description || el("span", { class: "muted" }, "No description.")),
+    propertyTable({ Origin: e.origin, Updated: e.updated_at, "Updated by": e.updated_by, "Graph ref": e.graph_ref }),
+    el("div", { style: "margin-top:10px" },
+      el("button", { onclick: () => details.replaceChildren(el("h2", {}, "Edit business entity"),
+        entityForm(e, async values => { await api("PUT", e.ref, values); toast(`Saved ${values.label}`); route(); }, showDetails)) }, "Edit"),
+      el("button", { class: "danger", onclick: async () => {
+        if (!confirm(`Delete the business entity "${e.label}"? It is removed from ${e.datasets.length} dataset(s), its `
+          + `${e.mention_count} document mention(s) are removed and relationships to or from it are deactivated.`)) return;
+        try {
+          const r = await api("DELETE", e.ref);
+          toast(`Deleted ${e.label}: ${r.removed.datasets} dataset(s), ${r.removed.document_mentions} mention(s), `
+            + `${r.removed.relationships} relationship(s)`);
+          location.hash = "#definitions/entities";
+        } catch (err) { showError(details, err); }
+      } }, "Delete")));
+  view.append(backLink("entities"), el("h1", {}, e.label), details,
+    el("div", { class: "panel" }, el("h2", {}, `Datasets (${e.datasets.length})`), e.datasets.length
+      ? el("ul", {}, e.datasets.map(d => el("li", {}, el("a", { href: `#dataset/${d.dataset_id}` }, d.catalog_ref))))
+      : el("p", { class: "muted" }, "None.")),
+    el("div", { class: "panel" }, el("h2", {}, `Document mentions (${e.mention_count})`), e.document_mentions.length
+      ? el("ul", {}, e.document_mentions.map(m => el("li", {}, el("a", { href: `#chunk/${m.chunk_id}` }, m.chunk_id), " in ",
+          el("a", { href: `#document/${m.document_id}` }, m.document_id))))
+      : el("p", { class: "muted" }, "None.")),
     graphPanel(e.graph));
+  showDetails();
 }
 
 function graphPanel(g) {
@@ -968,48 +1041,245 @@ function graphPanel(g) {
 }
 
 // ---------------------------------------------------------------- definitions
-async function renderDefinitions() {
-  const name = el("input", { type: "text", placeholder: "Active Customer" });
-  const text = el("textarea", { placeholder: "A customer with a completed order in the past 90 days." });
-  const ents = el("input", { type: "text", placeholder: "Customer, Order" });
-  const terms = el("input", { type: "text", placeholder: "Customer Identifier" });
-  const author = el("input", { type: "text", placeholder: "your name" });
-  const src = el("input", { type: "text", placeholder: "policy document, ticket, URL…" });
+// One menu entry with three tabs, each with its own address: #definitions/glossary (business terms: view, add,
+// edit, delete), #definitions/entities (business entities: view, edit, delete) and #definitions/definitions
+// (business definitions: view, add, edit, delete). #definitions alone opens the last tab used in this browser.
+// A term, entity or definition opens on its own page (#term/<slug>, #entity/<slug>, #definition/<id>).
+const DEFINITIONS_TABS = {
+  glossary: { label: "Business Glossary", render: renderGlossaryTab },
+  entities: { label: "Business Entities", render: renderEntitiesTab },
+  definitions: { label: "Business Definitions", render: renderDefinitionsTab },
+};
+async function renderDefinitions(arg) {
+  let tab = arg;
+  if (!DEFINITIONS_TABS[tab]) {
+    let last = null;
+    try { last = localStorage.getItem("meshDefinitionsTab"); } catch (e) { /* storage blocked */ }
+    tab = DEFINITIONS_TABS[last] ? last : "glossary";
+    history.replaceState(null, "", `#definitions/${tab}`);
+  }
+  try { localStorage.setItem("meshDefinitionsTab", tab); } catch (e) { /* storage blocked */ }
+  view.append(el("h1", {}, "Definitions"),
+    el("div", { class: "tabs", role: "tablist", "aria-label": "Definitions" },
+      Object.entries(DEFINITIONS_TABS).map(([key, t]) => el("a", { href: `#definitions/${key}`, role: "tab",
+        class: key === tab ? "tab active" : "tab", "aria-selected": key === tab ? "true" : "false" }, t.label))));
+  await DEFINITIONS_TABS[tab].render();
+}
+
+function backLink(tab) {
+  return el("a", { class: "small", href: `#definitions/${tab}` }, `← ${DEFINITIONS_TABS[tab].label}`);
+}
+function originBadge(origin) {
+  return badge(origin, { manual: "info", edited: "warn" }[origin] || "");
+}
+function propertyTable(rows) {
+  return el("table", { style: "margin-top:10px" }, Object.entries(rows).map(([k, v]) =>
+    el("tr", {}, el("th", {}, k), el("td", { class: k === "Graph ref" ? "mono" : "" }, fmt(v)))));
+}
+// A delete refused because the term is still used: list the definitions that reference it.
+function showBlocked(container, err) {
+  const defs = err.status === 409 && err.data && err.data.error && err.data.error.details && err.data.error.details.definitions;
+  if (!defs) { showError(container, err); return; }
+  container.append(el("div", { class: "panel error" }, el("strong", {}, err.message),
+    el("ul", {}, defs.map(d => el("li", {}, el("a", { href: `#definition/${encodeURIComponent(d.definition_id)}` }, d.name))))));
+}
+// A list filtered on the server (q) as the user types.
+function filteredList(path, key, render, placeholder) {
+  const guard = navGuard();
+  const filter = el("input", { type: "search", placeholder });
+  const body = el("div");
+  let timer = null;
+  const load = async () => {
+    const q = filter.value.trim();
+    const data = await api("GET", q ? `${path}?q=${encodeURIComponent(q)}` : path);
+    if (guard()) return;
+    body.replaceChildren(data[key].length ? render(data[key]) : el("p", { class: "muted" }, "None."));
+  };
+  filter.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => load().catch(err => showError(body, err)), 250); });
+  return { node: el("div", {}, filter, body), load };
+}
+
+async function renderGlossaryTab() {
+  const list = filteredList("/api/business-terms", "terms", terms => el("table", {},
+    el("tr", {}, ["Business term", "Description", "Sensitive", "Columns", "Definitions", "Origin"].map(h => el("th", {}, h))),
+    terms.map(t => el("tr", {}, el("td", {}, el("a", { href: `#term/${encodeURIComponent(t.slug)}` }, t.label)),
+      el("td", { class: "small" }, fmt(t.description)),
+      el("td", {}, t.sensitive === null ? "—" : (sensitiveTag(t.sensitive) || "no")),
+      el("td", {}, String(t.column_count)), el("td", {}, String(t.definition_count)), el("td", {}, originBadge(t.origin))))),
+    "Filter business terms");
+  view.append(
+    el("div", { class: "panel" }, el("h2", {}, "Add a business term"),
+      termForm(null, async values => {
+        const t = await api("POST", "/api/business-terms", values);
+        toast(`Added ${t.label}`); location.hash = `#term/${encodeURIComponent(t.slug)}`;
+      })),
+    el("div", { class: "panel" }, el("h2", {}, "Business terms"), list.node));
+  await list.load();
+}
+
+async function renderEntitiesTab() {
+  const list = filteredList("/api/business-entities", "entities", entities => el("table", {},
+    el("tr", {}, ["Business entity", "Description", "Datasets", "Document mentions", "Origin"].map(h => el("th", {}, h))),
+    entities.map(e => el("tr", {}, el("td", {}, el("a", { href: `#entity/${encodeURIComponent(e.slug)}` }, e.label)),
+      el("td", { class: "small" }, fmt(e.description)), el("td", {}, String(e.dataset_count)),
+      el("td", {}, String(e.mention_count)), el("td", {}, originBadge(e.origin))))),
+    "Filter business entities");
+  view.append(el("div", { class: "panel" }, el("h2", {}, "Business entities"), list.node));
+  await list.load();
+}
+
+async function renderDefinitionsTab() {
+  const list = await api("GET", "/api/business-definitions");
+  const form = await definitionForm(null, async values => {
+    const d = await api("POST", "/api/business-definitions", values);
+    toast(`Added ${d.name}`); location.hash = `#definition/${encodeURIComponent(d.definition_id)}`;
+  });
+  view.append(
+    el("div", { class: "panel" }, el("h2", {}, "Add a business definition"), form),
+    el("div", { class: "panel" }, el("h2", {}, `Business definitions (${list.definitions.length})`), list.definitions.length
+      ? el("table", {}, el("tr", {}, ["Name", "Definition", "Business terms", "Policy document"].map(h => el("th", {}, h))),
+          list.definitions.map(d => el("tr", {}, el("td", {}, el("a", { href: `#definition/${encodeURIComponent(d.definition_id)}` }, d.name)),
+            el("td", { class: "small" }, d.definition), el("td", {}, d.terms.map(termChip)), el("td", {}, documentLink(d)))))
+      : el("p", { class: "muted" }, "None.")));
+}
+
+function termChip(t) {
+  return el("a", { href: `#term/${encodeURIComponent(t.slug)}`, style: "margin-right:6px" }, badge(t.label, "info"));
+}
+function documentLink(d) {
+  if (!d.document) return el("span", { class: "muted" }, "—");
+  return [el("a", { href: `#document/${encodeURIComponent(d.document.document_id)}` }, d.document.title || d.document.document_id),
+    d.location ? el("span", { class: "small muted" }, ` (${d.location})`) : null];
+}
+
+function sensitiveSelect(value) {
+  const s = el("select", {}, el("option", { value: "" }, "Not assessed"),
+    el("option", { value: "yes" }, "Yes: can identify a person"), el("option", { value: "no" }, "No"));
+  s.value = value === true ? "yes" : (value === false ? "no" : "");
+  return s;
+}
+// Add / edit form of a business term. onSave(values) may throw; the error is shown under the form.
+function termForm(term, onSave, onCancel) {
+  const label = el("input", { type: "text", maxlength: 200, placeholder: "Customer Date Of Birth" });
+  const description = el("textarea", { maxlength: 2000, placeholder: "What the term means for the business." });
+  const sensitive = sensitiveSelect(term ? term.sensitive : null);
+  label.value = term ? term.label : "";
+  description.value = (term && term.description) || "";
   const result = el("div");
-  const split = s => s.value.split(",").map(x => x.trim()).filter(Boolean);
   const save = async () => {
-    if (!checkRequired(true)) return;
     result.replaceChildren();
+    if (!label.value.trim()) { showError(result, new Error("The label is required.")); return; }
     try {
-      const d = await api("POST", "/api/business-definitions", { name: name.value, definition: text.value,
-        entities: split(ents), terms: split(terms), author: author.value || null, source_ref: src.value || null });
-      toast(`Saved ${d.name}`); location.hash = `#definition/${d.definition_id}`;
+      await onSave({ label: label.value.trim(), description: description.value.trim() || null,
+                     sensitive: sensitive.value === "" ? null : sensitive.value === "yes" });
     } catch (err) { showError(result, err); }
   };
-  const list = await api("GET", "/api/business-definitions");
-  view.append(el("h1", {}, "Business definitions"),
-    el("div", { class: "panel" }, el("h2", {}, "Capture a definition"),
-      el("label", {}, "Name"), name, el("label", {}, "Definition"), text,
-      el("label", {}, "Business entities it describes (comma separated)"), ents,
-      el("label", {}, "Business terms it describes (comma separated)"), terms,
-      el("div", { class: "grid3" }, el("div", {}, el("label", {}, "Author"), author), el("div", {}, el("label", {}, "Source reference"), src)),
-      el("div", { style: "margin-top:10px" }, el("button", { onclick: save }, "Save definition")),
-      el("p", { class: "small muted" }, "Definitions are validated against SHACL shapes before publication; a definition must link to at least one entity or term."),
-      result),
-    el("div", { class: "panel" }, el("h2", {}, `Captured (${list.definitions.length})`),
-      el("table", {}, list.definitions.map(d => el("tr", {}, el("td", {}, el("a", { href: `#definition/${d.definition_id}` }, d.name)),
-        el("td", {}, d.definition), el("td", {}, [...d.entities, ...d.terms].map(x => badge(x.label))))))));
+  return el("div", {}, el("label", {}, "Label"), label, el("label", {}, "Description"), description,
+    el("label", {}, "Sensitive"), sensitive,
+    el("div", { style: "margin-top:10px" }, el("button", { onclick: save }, term ? "Save" : "Add term"),
+      onCancel ? el("button", { class: "secondary", onclick: onCancel }, "Cancel") : null),
+    term ? el("p", { class: "small muted" }, "The term keeps its identifier (graph URI) when the label changes; term generation will not overwrite your edit.") : null,
+    result);
+}
+// Edit form of a business entity (entities are not added by hand).
+function entityForm(entity, onSave, onCancel) {
+  const label = el("input", { type: "text", maxlength: 200 });
+  const description = el("textarea", { maxlength: 2000, placeholder: "What the entity is for the business." });
+  label.value = entity.label;
+  description.value = entity.description || "";
+  const result = el("div");
+  const save = async () => {
+    result.replaceChildren();
+    if (!label.value.trim()) { showError(result, new Error("The label is required.")); return; }
+    try { await onSave({ label: label.value.trim(), description: description.value.trim() || null }); }
+    catch (err) { showError(result, err); }
+  };
+  return el("div", {}, el("label", {}, "Label"), label, el("label", {}, "Description"), description,
+    el("div", { style: "margin-top:10px" }, el("button", { onclick: save }, "Save"),
+      el("button", { class: "secondary", onclick: onCancel }, "Cancel")),
+    el("p", { class: "small muted" }, "The entity keeps its identifier (graph URI) when the label changes."), result);
+}
+// Add / edit form of a business definition: business terms (existing ones only) and, optionally, the policy
+// document (an ingested document) where it is defined, with an optional page or section.
+async function definitionForm(def, onSave, onCancel) {
+  const [termData, docData] = await Promise.all([api("GET", "/api/business-terms"), api("GET", "/api/documents?limit=200")]);
+  const terms = termData.terms;
+  const name = el("input", { type: "text", maxlength: 200, placeholder: "Active Customer" });
+  const text = el("textarea", { maxlength: 5000, placeholder: "A customer with a completed order in the past 90 days." });
+  const place = el("input", { type: "text", maxlength: 200, placeholder: "page 4, section 2.1 …" });
+  const author = el("input", { type: "text", maxlength: 200, placeholder: "your name" });
+  const document_ = el("select", {}, el("option", { value: "" }, "No policy document"),
+    docData.documents.map(d => el("option", { value: d.document_id }, d.title || d.filename || d.document_id)));
+  name.value = def ? def.name : "";
+  text.value = def ? def.definition : "";
+  place.value = (def && def.location) || "";
+  author.value = (def && def.author) || "";
+  document_.value = (def && def.document && def.document.document_id) || "";
+  const chosen = new Map(def ? def.terms.map(t => [t.slug, t.label]) : []);
+  const listId = `term-options-${Math.random().toString(36).slice(2, 8)}`;
+  const termInput = el("input", { type: "text", list: listId, placeholder: "Type a business term, then Enter" });
+  const options = el("datalist", { id: listId }, terms.map(t => el("option", { value: t.label })));
+  const chosenBox = el("div", { style: "margin-top:6px" });
+  const renderChosen = () => chosenBox.replaceChildren(...[...chosen].map(([slug, label]) => el("span", { class: "badge info", style: "margin-right:6px" },
+    label, " ", el("a", { href: "#", title: "Remove", onclick: e => { e.preventDefault(); chosen.delete(slug); renderChosen(); } }, "×"))));
+  const addTerm = () => {
+    const v = termInput.value.trim().toLowerCase();
+    if (!v) return;
+    const t = terms.find(x => x.label.toLowerCase() === v || x.slug === v);
+    if (!t) { toast("Pick an existing business term (add it in the Business Glossary first).", true); return; }
+    chosen.set(t.slug, t.label); termInput.value = ""; renderChosen();
+  };
+  termInput.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); addTerm(); } });
+  termInput.addEventListener("change", addTerm);
+  renderChosen();
+  const result = el("div");
+  const save = async () => {
+    result.replaceChildren();
+    const missing = [!name.value.trim() && "name", !text.value.trim() && "definition",
+                     !chosen.size && "at least one business term"].filter(Boolean);
+    if (missing.length) { showError(result, new Error(`Required: ${missing.join(", ")}.`)); return; }
+    if (place.value.trim() && !document_.value) {
+      showError(result, new Error("A location (page or section) needs the policy document it refers to.")); return;
+    }
+    try {
+      await onSave({ name: name.value.trim(), definition: text.value.trim(), terms: [...chosen.keys()],
+                     document_id: document_.value || null, location: place.value.trim() || null,
+                     author: author.value.trim() || null });
+    } catch (err) { showError(result, err); }
+  };
+  return el("div", {}, el("label", {}, "Name"), name, el("label", {}, "Definition"), text,
+    el("label", {}, "Business terms it defines"), termInput, options, chosenBox,
+    el("div", { class: "grid3" }, el("div", {}, el("label", {}, "Policy document (optional)"), document_),
+      el("div", {}, el("label", {}, "Location in the document (optional)"), place),
+      el("div", {}, el("label", {}, "Author"), author)),
+    el("div", { style: "margin-top:10px" }, el("button", { onclick: save }, def ? "Save" : "Add definition"),
+      onCancel ? el("button", { class: "secondary", onclick: onCancel }, "Cancel") : null),
+    el("p", { class: "small muted" }, "A definition references business terms only and, optionally, the policy document where it is defined. It is validated against the SHACL shapes before publication."),
+    result);
 }
 
 async function renderDefinition(id) {
   const d = await api("GET", `/api/business-definitions/${encodeURIComponent(id)}`);
-  view.append(el("h1", {}, d.name), el("div", { class: "panel" }, el("div", { class: "answer" }, d.definition),
-    el("h3", {}, "Describes"), el("div", {}, d.entities.map(e => el("a", { href: `#entity/${e.ref.split("/").pop()}`, style: "margin-right:8px" }, badge(`entity: ${e.label}`, "ok"))),
-      d.terms.map(t => el("a", { href: `#term/${t.ref.split("/").pop()}`, style: "margin-right:8px" }, badge(`term: ${t.label}`, "info")))),
-    el("table", { style: "margin-top:10px" }, Object.entries({ Author: d.author, "Source reference": d.source_ref, Created: d.created_at,
-      Updated: d.updated_at, "Graph ref": d.graph_ref }).map(([k, v]) => el("tr", {}, el("th", {}, k), el("td", { class: "mono" }, fmt(v))))),
-    el("div", { style: "margin-top:10px" }, el("button", { class: "danger", onclick: async () => {
-      if (!confirm("Delete this definition?")) return; await api("DELETE", d.ref); location.hash = "#definitions"; } }, "Delete"))));
+  const details = el("div", { class: "panel" });
+  const showDetails = () => details.replaceChildren(
+    el("div", { class: "answer" }, d.definition),
+    el("h3", {}, "Business terms"), el("div", {}, d.terms.map(termChip)),
+    el("h3", {}, "Policy document"), el("div", {}, documentLink(d)),
+    propertyTable({ Author: d.author, Created: d.created_at, Updated: d.updated_at, "Graph ref": d.graph_ref }),
+    el("div", { style: "margin-top:10px" },
+      el("button", { onclick: async () => {
+        const form = await definitionForm(d, async values => {
+          await api("PUT", d.ref, values); toast(`Saved ${values.name}`); route();
+        }, showDetails);
+        details.replaceChildren(el("h2", {}, "Edit business definition"), form);
+      } }, "Edit"),
+      el("button", { class: "danger", onclick: async () => {
+        if (!confirm(`Delete the business definition "${d.name}"?`)) return;
+        try { await api("DELETE", d.ref); toast(`Deleted ${d.name}`); location.hash = "#definitions/definitions"; }
+        catch (err) { showError(details, err); }
+      } }, "Delete")));
+  view.append(backLink("definitions"), el("h1", {}, d.name), details);
+  showDetails();
 }
 
 // ---------------------------------------------------------------- settings
@@ -1366,7 +1636,9 @@ async function renderJob(id, offset) {
       el("span", { class: "small mono" }, JSON.stringify(job.counts))),
       job.error ? el("pre", { class: "error" }, JSON.stringify(job.error, null, 2)) : null,
       Object.keys(job.result || {}).length ? el("details", {}, el("summary", {}, "Result summary"), el("pre", {}, JSON.stringify(job.result, null, 2))) : null,
-      el("div", { class: "small mono muted" }, `trace ${fmt(job.trace_id)} · created ${job.created_at} · finished ${fmt(job.finished_at)}`)),
+      el("div", { class: "small mono muted" }, `trace ${fmt(job.trace_id)} · created ${job.created_at} · finished ${fmt(job.finished_at)}`,
+        job.observability && job.observability.trace_url
+          ? [" · ", el("a", { href: job.observability.trace_url, target: "_blank", rel: "noopener" }, "open trace in Phoenix")] : null)),
     el("div", { class: "panel" }, el("h2", {}, `Manifest (${items.total} items)`), el("table", {},
       el("tr", {}, ["#", "Reference", "Status", "Reason", "Detail"].map(h => el("th", {}, h))),
       items.items.map(i => el("tr", {}, el("td", {}, i.seq), el("td", { class: "mono small" }, linkFor(i)), el("td", {}, statusBadge(i.status)),
@@ -1384,6 +1656,4 @@ function linkFor(item) {
   return ref;
 }
 
-loadHealth();
-setInterval(loadHealth, 30000);
 route();

@@ -44,11 +44,11 @@ The planner can return one intent or multiple intents.
 The MCP server provides these tools:
 
 - `query_knowledge_graph`
-- `retrieve_context`
+- `retrieve_documents`
 
 Use `query_knowledge_graph` to get business entities, business terms, and their relationships.
 
-Use `retrieve_context` to get information from documents.
+Use `retrieve_documents` to get information from documents.
 
 The executor LLM selects the tool.
 
@@ -72,12 +72,12 @@ Do not create relationships that do not exist in the knowledge graph.
 
 ## 6. Document Retrieval
 
-1. Send the applicable retrieval query to `retrieve_context`.
+1. Send the applicable retrieval query to `retrieve_documents`.
 2. Get the relevant document sections.
 3. Add the document sections to the executor context.
 4. Keep the source references.
 
-Do not change the existing `retrieve_context` tool.
+Do not change the existing `retrieve_documents` tool.
 
 ## 7. Multiple Intents
 
@@ -110,7 +110,7 @@ Do not execute an intent before its dependencies are complete.
 ## 10. Implementation Constraints
 
 - Keep the existing harness loop unchanged.
-- Keep the existing `retrieve_context` tool unchanged.
+- Keep the existing `retrieve_documents` tool unchanged.
 - Add the `query_knowledge_graph` MCP tool.
 - Keep the planner and executor prompts separate.
 - Let the executor LLM select the MCP tools.

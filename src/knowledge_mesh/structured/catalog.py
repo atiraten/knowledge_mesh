@@ -19,12 +19,22 @@ from ..storage.db import Database, dumps, loads
 from .connectors import Connector, DatasetRef, DatasetSchema
 from .connectors.base import coverage_note
 from .fk_rules import FKRules, assess_foreign_key
+from .glossary_store import columns_select, datasets_select
 from .reviews import ReviewStore, lookup
 
 if TYPE_CHECKING:
     from .sources import SourceRegistry
 
 log = logging.getLogger(__name__)
+
+
+def clear_pk_candidates(conn, now: str, dataset_id: str | None = None) -> None:
+    """A declared primary key is the table's PK: none of its inferred unique keys is a PK candidate. Key discovery
+    applies this when it runs; this clears candidates stored before the PK was declared (or by older versions)."""
+    scope = " AND dataset_id = ?" if dataset_id else ""
+    conn.execute("UPDATE keys SET is_pk_candidate = 0, updated_at = ? WHERE origin = 'inferred' AND is_pk_candidate = 1 "
+                 "AND dataset_id IN (SELECT dataset_id FROM keys WHERE origin = 'declared' AND key_type = 'primary' "
+                 f"AND active = 1{scope})", (now, dataset_id) if dataset_id else (now,))
 
 
 class CatalogService:
@@ -38,6 +48,7 @@ class CatalogService:
                 "ON CONFLICT(source_id) DO UPDATE SET kind=excluded.kind",
                 (src.id, src.kind, "configured"),
             )
+        clear_pk_candidates(self.db, utcnow())
 
     # -- sources ---------------------------------------------------------------------------
     def source_settings(self, source_id: str):
@@ -79,8 +90,10 @@ class CatalogService:
     def source_tree(self, source_id: str) -> dict[str, Any]:
         src = self.source_settings(source_id)
         datasets = self.db.query(
-            "SELECT dataset_id, schema_name, name, kind, row_count, column_count, entity_label, entity_slug, catalog_ref "
-            "FROM datasets WHERE source_id = ? AND active = 1 ORDER BY schema_name, name", (source_id,))
+            "SELECT d.dataset_id, d.schema_name, d.name, d.kind, d.row_count, d.column_count, e.label AS entity_label,"
+            " d.entity_slug, d.catalog_ref FROM datasets d"
+            " LEFT JOIN business_entities e ON e.slug = d.entity_slug AND e.deleted = 0"
+            " WHERE d.source_id = ? AND d.active = 1 ORDER BY d.schema_name, d.name", (source_id,))
         schemas: dict[str, list] = {}
         for d in datasets:
             schemas.setdefault(d["schema_name"] or "", []).append({**d, "ref": f"/api/datasets/{d['dataset_id']}"})
@@ -97,18 +110,20 @@ class CatalogService:
         if name_contains:
             like = _like(name_contains)
             where.append("(LOWER(d.name) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(d.schema_name, '')) LIKE ? ESCAPE '\\' "
-                         "OR LOWER(COALESCE(d.entity_label, '')) LIKE ? ESCAPE '\\')")
+                         "OR LOWER(COALESCE(e.label, '')) LIKE ? ESCAPE '\\')")
             params += [like] * 3
         if column_contains:
             like = _like(column_contains)
-            where.append("d.dataset_id IN (SELECT c.dataset_id FROM columns c WHERE c.active = 1 AND "
-                         "(LOWER(c.name) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(c.term_label, '')) LIKE ? ESCAPE '\\'))")
+            where.append("d.dataset_id IN (SELECT c.dataset_id FROM columns c LEFT JOIN business_terms t"
+                         " ON t.slug = c.term_slug AND t.deleted = 0 WHERE c.active = 1 AND "
+                         "(LOWER(c.name) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(t.label, '')) LIKE ? ESCAPE '\\'))")
             params += [like] * 2
         cond = " AND ".join(where)
-        total = self.db.scalar(f"SELECT COUNT(*) FROM datasets d WHERE {cond}", params)
+        entity_join = "LEFT JOIN business_entities e ON e.slug = d.entity_slug AND e.deleted = 0"
+        total = self.db.scalar(f"SELECT COUNT(*) FROM datasets d {entity_join} WHERE {cond}", params)
         rows = self.db.query(
             "SELECT d.dataset_id, d.source_id, d.schema_name, d.name, d.kind, d.row_count, d.column_count, "
-            f"d.entity_label, d.catalog_ref FROM datasets d WHERE {cond} "
+            f"e.label AS entity_label, d.catalog_ref FROM datasets d {entity_join} WHERE {cond} "
             "ORDER BY d.source_id, d.schema_name, d.name LIMIT ?", [*params, max(1, min(int(limit), 100))])
         return {"total": total, "datasets": [{**r, "ref": f"/api/datasets/{r['dataset_id']}"} for r in rows]}
 
@@ -238,6 +253,7 @@ class CatalogService:
                                   "AND active = 1", (dataset_id,)).fetchall():
                 if not set(loads(k["columns_json"], [])) <= names:
                     conn.execute("UPDATE keys SET active = 0, updated_at = ? WHERE key_id = ?", (now, k["key_id"]))
+            clear_pk_candidates(conn, now, dataset_id)
         return dataset_id, changed
 
     def _retire_missing_datasets(self, source_id: str, seen: list[str]) -> int:
@@ -256,7 +272,8 @@ class CatalogService:
 
     # -- reads ---------------------------------------------------------------------------------
     def dataset_row(self, dataset_id: str) -> dict[str, Any]:
-        row = self.db.query_one("SELECT * FROM datasets WHERE dataset_id = ?", (dataset_id,))
+        """The dataset with its business entity (label, description) from the business glossary."""
+        row = self.db.query_one(datasets_select(self.db) + " WHERE d.dataset_id = ?", (dataset_id,))
         if row is None:
             raise NotFound(f"dataset not found: {dataset_id}")
         return row
@@ -265,7 +282,9 @@ class CatalogService:
         return DatasetRef(row["schema_name"], row["name"], row["kind"] or "table")
 
     def active_columns(self, dataset_id: str) -> list[dict[str, Any]]:
-        return self.db.query("SELECT * FROM columns WHERE dataset_id = ? AND active = 1 ORDER BY ordinal", (dataset_id,))
+        """Active columns with their business term (label, description, flag) from the business glossary."""
+        return self.db.query(columns_select(self.db) + " WHERE c.dataset_id = ? AND c.active = 1 ORDER BY c.ordinal",
+                             (dataset_id,))
 
     def get_dataset(self, dataset_id: str) -> dict[str, Any]:
         d = self.dataset_row(dataset_id)
@@ -279,9 +298,6 @@ class CatalogService:
         names = {r["dataset_id"]: r for r in self.db.query("SELECT dataset_id, name, catalog_ref FROM datasets")}
         rules = FKRules.from_settings(self.config.profiling)
         decisions = ReviewStore(self.db).all()
-        definitions = []
-        if d.get("entity_slug"):
-            definitions = self._definitions_for("entity", d["entity_slug"])
 
         def key_view(k: dict[str, Any]) -> dict[str, Any]:
             view = self._key_with_confidence(k, names, rules)
@@ -297,7 +313,8 @@ class CatalogService:
 
         entity = None
         if d.get("entity_label"):
-            entity = {"label": d["entity_label"], "slug": d["entity_slug"], "method": d["entity_method"],
+            entity = {"label": d["entity_label"], "slug": d["entity_slug"], "description": d.get("entity_description"),
+                      "method": d["entity_method"],
                       "graph_ref": f"urn:mesh:entity:{d['entity_slug']}", "ref": f"/api/business-entities/{d['entity_slug']}",
                       "status": lookup(decisions, "entity_mapping", dataset_id, d["entity_slug"])}
         return {
@@ -305,7 +322,6 @@ class CatalogService:
             "kind": d["kind"], "catalog_ref": d["catalog_ref"], "physical_ref": d["physical_ref"],
             "row_count": d["row_count"], "active": bool(d["active"]), "last_seen_at": d["last_seen_at"],
             "business_entity": entity,
-            "definitions": definitions,
             "columns": [column_view(c) for c in columns],
             "keys": [key_view(k) for k in keys],
             "referenced_by": [key_view(k) for k in incoming],
@@ -334,7 +350,7 @@ class CatalogService:
                 "sensitive": None if c.get("term_sensitive") is None else bool(c["term_sensitive"]),
                 "ref": f"/api/business-terms/{c['term_slug']}",
             }
-        elif c.get("term_status") == "failed":
+        elif c.get("term_status") in ("failed", "rejected"):  # rejected: blank after the review rounds
             view["business_term_error"] = c.get("term_error")
         if profile:
             view["profile"] = {
@@ -374,15 +390,17 @@ class CatalogService:
         return out
 
     def get_column(self, column_id: str) -> dict[str, Any]:
-        c = self.db.query_one("SELECT * FROM columns WHERE column_id = ?", (column_id,))
+        c = self.db.query_one(columns_select(self.db) + " WHERE c.column_id = ?", (column_id,))
         if c is None:
             raise NotFound(f"column not found: {column_id}")
         return {**self._column_view(c, None), "dataset_id": c["dataset_id"], "active": bool(c["active"]),
                 "dataset_ref": f"/api/datasets/{c['dataset_id']}"}
 
     def entity_labels(self) -> list[str]:
-        return [r["entity_label"] for r in self.db.query(
-            "SELECT DISTINCT entity_label FROM datasets WHERE active = 1 AND entity_label IS NOT NULL")]
+        """Labels of the business entities of active datasets (lexicon for document entity extraction)."""
+        return [r["label"] for r in self.db.query(
+            "SELECT DISTINCT e.label FROM datasets d JOIN business_entities e ON e.slug = d.entity_slug"
+            " WHERE d.active = 1 AND e.deleted = 0")]
 
 
 def _like(text: str) -> str:

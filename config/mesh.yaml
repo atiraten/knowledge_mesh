@@ -130,7 +130,7 @@ retrieval:
   reranker_enabled: true       # rerank the top-k document passages with the Laya decision model (below)
   min_document_similarity: 0.2
   min_glossary_similarity: 0.3
-  max_queries: 5               # queries in one multi-query retrieval (the agent's retrieve_context)
+  max_queries: 5               # queries in one multi-query retrieval (the agent's retrieve_documents)
   max_parallel_queries: 4      # of those, searched at the same time
 
 # Laya reranking (2 calls): "description" choice over the top-k passages -> keep probability > min_probability
@@ -140,7 +140,7 @@ reranker:
   provider: laya
   model: convaiinnovations/laya
   subfolder: null              # "multilingual" for non-English documents
-  min_probability: 0.4
+  min_probability: 0.2
   top_n: 2
   min_quality: Acceptable
   quality_levels: [Incorrect, Ambiguous, Acceptable, Clear, Excellent]
@@ -237,3 +237,23 @@ api:
   host: 127.0.0.1
   port: 8000
   api_key_env: KNOWLEDGE_MESH_API_KEY   # when this variable is set, /api requires X-API-Key
+
+# The search agent harness uses MCP tools only, through the MCP protocol.
+mcp:
+  mode: in_process                      # in_process (default): in-memory MCP client session to this process's server
+                                        # streamable_http: the MCP server is mounted at /mcp in the app (same process,
+                                        #   one copy of the data); the harness connects to url, outside MCP clients too.
+                                        #   /mcp requires X-API-Key when KNOWLEDGE_MESH_API_KEY is set.
+  url: http://127.0.0.1:9801/mcp        # streamable_http only (scripts/mesh.sh serves on port 9801)
+  tools:                                # MCP tools offered to the executor (read-only; no crawl, ingest, catalog, keys)
+    - retrieve_documents
+    - read_document
+    - query_knowledge_graph
+    - find_datasets
+    - get_dataset
+    - get_business_term
+    - get_business_entity
+    - get_business_definition
+    - generate_sql
+    - execute_sql
+    - generate_html

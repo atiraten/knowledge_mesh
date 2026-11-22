@@ -61,7 +61,12 @@ def inline_schema(model: type[BaseModel], require_all: bool = False) -> dict[str
     """The model's JSON schema with ``$ref``s inlined and ``title``/``default`` removed, so it can be
     passed to providers that accept only a JSON Schema subset. ``require_all`` marks every property
     required (the parser stays lenient; this only tells the model to fill every field)."""
-    schema = model.model_json_schema()
+    return inline_json_schema(model.model_json_schema(), require_all)
+
+
+def inline_json_schema(schema: dict[str, Any], require_all: bool = False) -> dict[str, Any]:
+    """A JSON schema (e.g. an MCP tool's input schema) with ``$ref``s inlined and ``title``/``default`` removed."""
+    schema = copy.deepcopy(schema)
     defs = schema.pop("$defs", {})
 
     def walk(node: Any) -> Any:

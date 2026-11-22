@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from knowledge_mesh.agent.plan import PLAN_SCHEMA, parse_json_object
-from knowledge_mesh.agent.tools import fit_observation
+from knowledge_mesh.agent.mcp_client import fit_observation
 from knowledge_mesh.api.app import create_app
 from knowledge_mesh.common.errors import InvalidArgument
 from knowledge_mesh.config import AgentSettings, load_config
@@ -39,7 +39,7 @@ SINGLE = {"original_query": "customer lifetime value", "decompose": False, "reas
           "execution": "single",
           "intents": [{"id": "I1", "intent": "Find customer lifetime value", "retrieval_queries": SINGLE_Q,
                        "depends_on": []}]}
-TOOLS = ["retrieve_context", "read_document", "find_datasets", "get_dataset", "get_business_term",
+TOOLS = ["retrieve_documents", "read_document", "find_datasets", "get_dataset", "get_business_term",
          "get_business_entity", "get_business_definition"]
 PROMPTS = {"planner_prompt_path": str(REPO / "prompts" / "planner.txt"),
            "executor_prompt_path": str(REPO / "prompts" / "executor.txt"),
@@ -117,14 +117,15 @@ def agent_mesh(mesh_factory, config_factory, sqlite_source, fake_term_llm):
     return make
 
 
-def spy_retrieve_many(mesh, monkeypatch):
-    seen, real, lock = [], mesh.retrieve_many, threading.Lock()
+def spy_retrieve(mesh, monkeypatch):
+    """The query lists the MCP tool retrieve_documents searched (it calls KnowledgeMesh.retrieve_documents)."""
+    seen, real, lock = [], mesh.retrieve_documents, threading.Lock()
 
     def spy(queries, *a, **k):
         with lock:
             seen.append(list(queries))
         return real(queries, *a, **k)
-    monkeypatch.setattr(mesh, "retrieve_many", spy)
+    monkeypatch.setattr(mesh, "retrieve_documents", spy)
     return seen
 
 
@@ -138,9 +139,9 @@ def clv_script():
         return act
 
     return Script(CLV_PLAN, {
-        "I1": [together(tools(call("retrieve_context", queries=I1Q, evidence_types=["documents"]))),
+        "I1": [together(tools(call("retrieve_documents", queries=I1Q, evidence_types=["documents"]))),
                lambda p: complete(f"CLV is the total revenue a customer generates [{first_id(p, 'D')}].")],
-        "I2": [together(tools(call("retrieve_context", queries=I2Q))),
+        "I2": [together(tools(call("retrieve_documents", queries=I2Q))),
                lambda p: complete(f"CLV is the sum of all order amounts of the customer [{first_id(p, 'D')}].")],
         "I3": [tools(call("find_datasets", name_contains="order"), call("find_datasets", column_contains="amount")),
                lambda p: tools(call("get_dataset", dataset_id=dataset_id(p, "orders"))),
@@ -155,7 +156,7 @@ def step_calls(llm, task=None):
 
 def test_clv_plan_runs_ready_tasks_together_then_dependents_then_synthesizes(agent_mesh, monkeypatch):
     mesh, llm = agent_mesh(clv_script())
-    searched = spy_retrieve_many(mesh, monkeypatch)
+    searched = spy_retrieve(mesh, monkeypatch)
     res = mesh.search(QUESTION)
     assert res["mode"] == "agent"
     assert {k: res["plan"][k] for k in CLV_PLAN} == CLV_PLAN and res["plan"]["version"] == 1
@@ -206,15 +207,16 @@ def test_planner_gets_no_tools_and_every_executor_call_gets_the_intents_and_tool
 
 def test_planned_queries_are_always_searched_first(agent_mesh, monkeypatch):
     script = Script(SINGLE, {"I1": [
-        tools(call("retrieve_context", queries=[QUESTION], evidence_types=["bogus"])),  # rejected: does not count
-        tools(call("retrieve_context", query=QUESTION)),                                 # single-query form
-        tools(call("retrieve_context", queries=["order amounts"])),
+        tools(call("retrieve_documents", queries=[QUESTION], evidence_types=["bogus"])),  # rejected: does not count
+        tools(call("retrieve_documents", query=QUESTION)),                                 # single-query form
+        tools(call("retrieve_documents", queries=["order amounts"])),
         complete("Done [D1]."),
     ]})
     mesh, llm = agent_mesh(script, catalog=False)
-    searched = spy_retrieve_many(mesh, monkeypatch)
+    searched = spy_retrieve(mesh, monkeypatch)
     res = mesh.search("customer lifetime value")
-    assert searched == [SINGLE_Q + [QUESTION], ["order amounts"]]
+    # the rejected first call (the server refuses the evidence type) is retried with the planned queries
+    assert searched == [SINGLE_Q + [QUESTION], SINGLE_Q + [QUESTION], ["order amounts"]]
     steps = res["tasks"][0]["steps"]
     assert steps[0]["tool_calls"][0]["error"]["code"] == "invalid_argument"
     second = steps[1]["tool_calls"][0]
@@ -226,8 +228,8 @@ def test_planned_queries_are_always_searched_first(agent_mesh, monkeypatch):
 def test_multi_query_results_are_merged_and_items_shown_before_are_compacted(agent_mesh):
     plan = {**SINGLE, "intents": [{**SINGLE["intents"][0],
                                    "retrieval_queries": ["Customer Lifetime Value", "Customer Lifetime Value revenue"]}]}
-    script = Script(plan, {"I1": [tools(call("retrieve_context", queries=[])),
-                                  tools(call("retrieve_context", queries=["lifetime value of a customer"])),
+    script = Script(plan, {"I1": [tools(call("retrieve_documents", queries=[])),
+                                  tools(call("retrieve_documents", queries=["lifetime value of a customer"])),
                                   complete("Done.")]})
     mesh, llm = agent_mesh(script, catalog=False)
     mesh.search("customer lifetime value")
@@ -286,7 +288,7 @@ def test_replans_are_capped_and_an_invalid_replan_keeps_the_plan(agent_mesh):
 def test_iteration_cap_is_per_task_and_triggers_a_replan(agent_mesh):
     assert AgentSettings().max_iterations == 20
     assert load_config(REPO / "config" / "mesh.yaml").agent.max_iterations == 20
-    script = Script(SINGLE, {"I1": [tools(call("retrieve_context", queries=["customer"]))]}, replan=SINGLE)
+    script = Script(SINGLE, {"I1": [tools(call("retrieve_documents", queries=["customer"]))]}, replan=SINGLE)
     mesh, llm = agent_mesh(script, agent={"max_iterations": 3}, catalog=False)
     res = mesh.search("customer lifetime value")
     assert [(t["status"], t["iterations"]) for t in res["tasks"]] == [("max_iterations", 3), ("max_iterations", 3)]
@@ -346,7 +348,7 @@ def test_plan_defaults_and_retrieval_query_normalization(agent_mesh):
     assert p["intents"][0]["intent"] == "Define CLV"
 
 
-def test_retrieve_many_searches_in_parallel_and_merges_duplicates(mesh_factory, monkeypatch):
+def test_retrieve_documents_searches_in_parallel_and_merges_duplicates(mesh_factory, monkeypatch):
     mesh = mesh_factory()
     mesh.ingest_document(content=CLV_DOC.encode(), filename="clv.md", wait_seconds=30)
     mesh.ingest_document(content=b"# Orders\nEach order has an amount and belongs to one customer.",
@@ -357,7 +359,7 @@ def test_retrieve_many_searches_in_parallel_and_merges_duplicates(mesh_factory, 
         barrier.wait()  # both queries in flight at once
         return real(query, *a, **k)
     monkeypatch.setattr(mesh.retrieval, "retrieve", together)
-    out = mesh.retrieve_many(["customer lifetime value", "Customer Lifetime Value", "customer revenue"][1:])
+    out = mesh.retrieve_documents(["customer lifetime value", "Customer Lifetime Value", "customer revenue"][1:])
     assert out["queries"] == ["Customer Lifetime Value", "customer revenue"]
     ids = [d["chunk_id"] for d in out["results"]]
     assert len(ids) == len(set(ids)) and [p["query"] for p in out["per_query"]] == out["queries"]
@@ -365,15 +367,15 @@ def test_retrieve_many_searches_in_parallel_and_merges_duplicates(mesh_factory, 
     assert scores == sorted(scores, reverse=True) and [d["rank"] for d in out["results"]] == list(range(1, len(ids) + 1))
     assert any(len(d["matched_queries"]) == 2 for d in out["results"])
     monkeypatch.setattr(mesh.retrieval, "retrieve", real)
-    assert mesh.retrieve_many(["a", "A", " a "])["queries"] == ["a"]
+    assert mesh.retrieve_documents(["a", "A", " a "])["queries"] == ["a"]
     with pytest.raises(InvalidArgument):
-        mesh.retrieve_many([f"q{i}" for i in range(6)])
+        mesh.retrieve_documents([f"q{i}" for i in range(6)])
 
 
 def test_old_results_become_stubs_when_the_context_is_full(agent_mesh):
-    script = Script(SINGLE, {"I1": [tools(call("retrieve_context", queries=["customer lifetime value"])),
-                                    tools(call("retrieve_context", queries=["order amounts"])),
-                                    tools(call("retrieve_context", queries=["customer revenue"])),
+    script = Script(SINGLE, {"I1": [tools(call("retrieve_documents", queries=["customer lifetime value"])),
+                                    tools(call("retrieve_documents", queries=["order amounts"])),
+                                    tools(call("retrieve_documents", queries=["customer revenue"])),
                                     complete("Done.")]})
     mesh, llm = agent_mesh(script, agent={"max_context_chars": 3000, "max_observation_chars": 1500}, catalog=False)
     mesh.search("customer lifetime value")

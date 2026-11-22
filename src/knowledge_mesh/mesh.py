@@ -20,15 +20,16 @@ from urllib.parse import unquote, urlsplit
 
 from rdflib import URIRef
 
-from .agent import AgentUnavailable, SearchHarness, SearchScope, build_search_tools
+from .agent import AgentUnavailable, McpToolBox, McpToolClient, SearchHarness, SearchScope
 from .common.errors import Conflict, GraphValidationError, InvalidArgument, MeshError, NotConfigured, NotFound, \
     UnsupportedMediaType
 from .common.ids import new_id, slugify, utcnow
 from .common.paths import resolve_authorized_path, safe_filename
 from .config import MeshConfig
 from .definitions import DefinitionService
-from .graph.builders import build_source_layers
+from .graph.builders import build_glossary_context, build_source_layers
 from .structured.fk_rules import FKRules
+from .structured.glossary_store import GlossaryStore
 from .structured.relationships import RelationshipGenerationService
 from .structured.reviews import ReviewStore
 from .graph.ontology import context_uri, entity_uri, term_uri
@@ -37,6 +38,7 @@ from .graph.store import KnowledgeGraph
 from .graph.view import graph_view
 from .common.html_render import HtmlRequest, render_html
 from .structured.sql_exec import SqlExecutor
+from .structured.sql_generation import SqlGenerationRequest, SqlGenerator
 from .indexing.embeddings import build_embedding
 from .indexing.vector_index import META_FILE, PersistentVectorIndex
 from .jobs import JobContext, JobRunner, JobStore
@@ -111,6 +113,11 @@ class KnowledgeMesh:
         self.sources = SourceRegistry(config, self.db, self.secrets, connector_factory or build_connector)
         self.catalog = CatalogService(config, self.db, self.sources)
         self.glossary = GlossaryService(self.db, self.glossary_index)
+        self.glossary_store = GlossaryStore(self.db)
+        filled = self.glossary_store.fill_if_empty()  # one-time: business glossary from the per-column copies
+        if filled["terms"] or filled["entities"]:
+            log.info("business glossary filled from the catalog", extra=filled)
+            self._publish_glossary()
 
         term_factory = None
         if term_llm is not None:
@@ -148,10 +155,12 @@ class KnowledgeMesh:
             agent_factory = lambda: agent_llm  # noqa: E731
         elif config.agent.enabled:
             agent_factory = lambda: build_llm(config.agent, prompt_version="agent")  # noqa: E731
+        self.sql_generator = SqlGenerator(config.agent.sql_generation_prompt_path, self.sql, agent_factory)
+        # the harness uses MCP tools only: in-process MCP session, or the /mcp endpoint (config ``mcp``)
+        self.mcp_tools = McpToolClient(config, lambda: self)
         self.harness = SearchHarness(
             config.agent, agent_factory,
-            lambda ledger, scope: build_search_tools(self, ledger, scope, config.agent.max_observation_chars,
-                                                     llm=lambda: self.harness._client()))
+            lambda ledger, scope: McpToolBox(self.mcp_tools, config, ledger, scope))
         # observability: audit trail, Phoenix annotations, online LLM judge, infrastructure gauges
         self.audit = AuditLog(self.db)
         self.phoenix = PhoenixClient(config.observability.phoenix_url, config.observability.service_name,
@@ -177,7 +186,10 @@ class KnowledgeMesh:
                                     "item_count", "manifest_ref")} | {"job_ref": f"/api/jobs/{job['job_id']}"}
 
     def get_job(self, job_id: str) -> dict[str, Any]:
-        return self.job_store.get(job_id)
+        job = self.job_store.get(job_id)
+        # link to the job's trace in Phoenix (model calls with their prompts and responses), as for searches
+        job["observability"] = {"trace_url": self.phoenix.trace_url(job.get("trace_id"))}
+        return job
 
     def job_items(self, job_id: str, offset: int = 0, limit: int = 50, status: str | None = None) -> dict[str, Any]:
         return self.job_store.items(job_id, offset, limit, status)
@@ -500,7 +512,20 @@ class KnowledgeMesh:
             return {"status": "rejected", "violations": len(exc.details.get("violations", []))}
         if job:
             job.add_item(f"graph:{source_id}", "succeeded", None, triples=out["triples"], contexts=out["contexts"])
+        self._publish_glossary()  # term generation can have changed generated labels and descriptions
         return {"status": "published", "triples": out["triples"], "contexts": out["contexts"]}
+
+    def _publish_glossary(self) -> dict[str, Any]:
+        """(Re)publish the business glossary context: every active term and entity with its description,
+        after dropping generated terms / entities nothing uses any more (see ``GlossaryStore.prune_unused``)."""
+        self.glossary_store.prune_unused()
+        try:
+            out = self.graph.publish(context_uri("glossary", "business"), build_glossary_context(self.db),
+                                     "business glossary")
+        except GraphValidationError as exc:
+            log.warning("business glossary rejected by SHACL", extra={"violations": len(exc.details.get("violations", []))})
+            return {"status": "rejected", "violations": len(exc.details.get("violations", []))}
+        return {"status": "published", "triples": out["triples"]}
 
     def provision_graph(self, source_ids: list[str] | None = None) -> dict[str, Any]:
         """Publish the vocabulary and (re)build the layered contexts of cataloged sources from SQLite.
@@ -577,6 +602,7 @@ class KnowledgeMesh:
             retired = self.catalog.retire_source(source_id)
             glossary = self.glossary.sync_source(source_id)
             self.graph.remove_source(source_id)
+            self._publish_glossary()  # the source's generated terms and entities leave the glossary
             log.info("structured source removed", extra={"source_id": source_id, "retired_datasets": retired})
             return {"source_id": source_id, "status": "removed", "retired_datasets": retired,
                     "glossary_vectors_removed": glossary["removed"]}
@@ -591,61 +617,150 @@ class KnowledgeMesh:
     def catalog_tree(self) -> list[dict[str, Any]]:
         return [{**s, **self.catalog.source_tree(s["source_id"])} for s in self.catalog.list_sources()]
 
+    # -- business glossary: terms and entities --------------------------------------------------------
+    def list_business_terms(self, query: str | None = None) -> dict[str, Any]:
+        terms = self.glossary_store.list_terms(query)
+        return {"total": len(terms), "terms": [
+            {**t, "sensitive": None if t["sensitive"] is None else bool(t["sensitive"]),
+             "ref": f"/api/business-terms/{t['slug']}"} for t in terms]}
+
     def get_business_term(self, slug: str) -> dict[str, Any]:
+        t = self.glossary_store.term(slug)
         cols = self.db.query(
-            "SELECT c.column_id, c.name, c.catalog_ref, c.term_label, c.term_description, c.term_explanation,"
-            " c.term_sensitive, d.dataset_id, d.name AS dataset, d.source_id FROM columns c JOIN datasets d ON d.dataset_id = c.dataset_id "
+            "SELECT c.column_id, c.name, c.catalog_ref, c.term_explanation, d.dataset_id, d.name AS dataset,"
+            " d.source_id FROM columns c JOIN datasets d ON d.dataset_id = c.dataset_id "
             "WHERE c.term_slug = ? AND c.active = 1 AND c.term_status = 'generated' ORDER BY d.name, c.ordinal", (slug,))
         node = term_uri(slug)
-        defs = self.catalog._definitions_for("term", slug)
-        if not cols and not defs and (node, None, None) not in self.graph.dataset:
-            raise NotFound(f"business term not found: {slug}")
-        graph = self.graph.describe_concept(node)
-        flags = [c["term_sensitive"] for c in cols]
-        sensitive = True if 1 in flags else (False if flags and None not in flags else None)
-        return {"slug": slug, "label": cols[0]["term_label"] if cols else graph["label"], "graph_ref": str(node),
-                "sensitive": sensitive,  # can identify a person (any column's flag); None when not assessed
-                "columns": [{**c, "dataset_ref": f"/api/datasets/{c['dataset_id']}"} for c in cols],
-                "definitions": defs, "graph": graph}
+        return {"slug": slug, "label": t["label"], "description": t["description"], "graph_ref": str(node),
+                "sensitive": None if t["sensitive"] is None else bool(t["sensitive"]),  # can identify a person
+                "origin": t["origin"], "created_at": t["created_at"], "updated_at": t["updated_at"],
+                "updated_by": t["updated_by"], "ref": f"/api/business-terms/{slug}",
+                "columns": [{**c, "term_label": t["label"], "term_description": t["description"],
+                             "dataset_ref": f"/api/datasets/{c['dataset_id']}"} for c in cols],
+                "definitions": self.definitions.for_term(slug), "graph": self.graph.describe_concept(node)}
+
+    def create_business_term(self, label: str, description: str | None = None, sensitive: bool | None = None,
+                             actor: str | None = None) -> dict[str, Any]:
+        with span("glossary.term.create", "CHAIN"):
+            row = self.glossary_store.add_term(label, description, sensitive, actor)
+            self._after_glossary_change({})
+            self.audit.record("create_business_term", caller=actor, resource_type="business_term",
+                              resource_ids=[row["slug"]])
+            return self.get_business_term(row["slug"])
+
+    def update_business_term(self, slug: str, label: str, description: str | None = None,
+                             sensitive: bool | None = None, actor: str | None = None) -> dict[str, Any]:
+        """Edit a term's label, description and flag; the slug (graph URI) stays. Republishes the graph
+        contexts and glossary records that show it."""
+        with span("glossary.term.update", "CHAIN", {"term.slug": slug}):
+            scope = self.glossary_store.term_scope(slug)
+            self.glossary_store.update_term(slug, label, description, sensitive, actor)
+            self._after_glossary_change(scope, definition_ids=[d["definition_id"]
+                                                               for d in self.definitions.for_term(slug)])
+            self.audit.record("update_business_term", caller=actor, resource_type="business_term",
+                              resource_ids=[slug])
+            return self.get_business_term(slug)
+
+    def delete_business_term(self, slug: str, actor: str | None = None) -> dict[str, Any]:
+        """Refused (409) while a business definition references the term."""
+        with span("glossary.term.delete", "CHAIN", {"term.slug": slug}):
+            out = self.glossary_store.delete_term(slug, actor)
+            out["graph"] = self._after_glossary_change(out)
+            self.audit.record("delete_business_term", caller=actor, resource_type="business_term",
+                              resource_ids=[slug])
+            return out
+
+    def list_business_entities(self, query: str | None = None) -> dict[str, Any]:
+        entities = self.glossary_store.list_entities(query)
+        return {"total": len(entities),
+                "entities": [{**e, "ref": f"/api/business-entities/{e['slug']}"} for e in entities]}
 
     def get_business_entity(self, slug: str) -> dict[str, Any]:
+        e = self.glossary_store.entity(slug)
         node = entity_uri(slug)
         datasets = self.db.query("SELECT dataset_id, name, catalog_ref, source_id FROM datasets "
-                                 "WHERE entity_slug = ? AND active = 1", (slug,))
+                                 "WHERE entity_slug = ? AND active = 1 ORDER BY name", (slug,))
         mentions = self.db.query("SELECT document_id, chunk_id FROM doc_entity_mentions WHERE entity_slug = ? LIMIT 25",
                                  (slug,))
-        defs = self.catalog._definitions_for("entity", slug)
-        if not datasets and not mentions and not defs and (node, None, None) not in self.graph.dataset:
-            raise NotFound(f"business entity not found: {slug}")
-        graph = self.graph.describe_concept(node)
-        return {"slug": slug, "label": graph["label"] or slug, "graph_ref": str(node),
+        return {"slug": slug, "label": e["label"], "description": e["description"], "origin": e["origin"],
+                "created_at": e["created_at"], "updated_at": e["updated_at"], "updated_by": e["updated_by"],
+                "graph_ref": str(node), "ref": f"/api/business-entities/{slug}",
                 "datasets": [{**d, "ref": f"/api/datasets/{d['dataset_id']}"} for d in datasets],
                 "document_mentions": [{**m, "chunk_ref": f"/api/chunks/{m['chunk_id']}"} for m in mentions],
-                "definitions": defs, "graph": graph}
+                "mention_count": self.db.scalar("SELECT COUNT(*) FROM doc_entity_mentions WHERE entity_slug = ?",
+                                                (slug,)),
+                "graph": self.graph.describe_concept(node)}
+
+    def update_business_entity(self, slug: str, label: str, description: str | None = None,
+                               actor: str | None = None) -> dict[str, Any]:
+        """Edit an entity's label and description; the slug (graph URI) stays."""
+        with span("glossary.entity.update", "CHAIN", {"entity.slug": slug}):
+            scope = self.glossary_store.entity_scope(slug)
+            self.glossary_store.update_entity(slug, label, description, actor)
+            self._after_glossary_change(scope)
+            self.audit.record("update_business_entity", caller=actor, resource_type="business_entity",
+                              resource_ids=[slug])
+            return self.get_business_entity(slug)
+
+    def delete_business_entity(self, slug: str, actor: str | None = None) -> dict[str, Any]:
+        """Remove the entity everywhere: datasets lose it, its document mentions and document relationships
+        are removed and relationships to or from it are deactivated; generation does not re-create it."""
+        with span("glossary.entity.delete", "CHAIN", {"entity.slug": slug}):
+            out = self.glossary_store.delete_entity(slug, actor)
+            out["graph"] = self._after_glossary_change(out)
+            self.audit.record("delete_business_entity", caller=actor, resource_type="business_entity",
+                              resource_ids=[slug])
+            return out
+
+    def _after_glossary_change(self, scope: dict[str, Any], definition_ids: list[str] | None = None) -> dict[str, Any]:
+        """Republish what shows the changed terms / entities: the glossary context, the sources' layers,
+        the documents' and definitions' contexts (one write), and the glossary vector records."""
+        sources = scope.get("source_ids", [])
+        # publishing a source also republishes the glossary context
+        out: dict[str, Any] = {"sources": {s: self._publish_source(None, s) for s in sources}}
+        if not sources:
+            out["glossary"] = self._publish_glossary()
+        contexts = {}
+        for doc_id in scope.get("document_ids", []):
+            g = self.indexing.document_graph(doc_id)
+            if g is not None:
+                contexts[context_uri("document", doc_id)] = g
+        for def_id in definition_ids or []:
+            g = self.definitions.graph_for(def_id)
+            if g is not None:
+                contexts[context_uri("definition", def_id)] = g
+        if contexts:
+            try:
+                out["contexts"] = self.graph.publish_many(contexts, "business glossary change")
+            except GraphValidationError as exc:
+                out["contexts"] = {"status": "rejected", "violations": len(exc.details.get("violations", []))}
+        for ds in scope.get("dataset_ids", []):
+            self.glossary.upsert_dataset(ds)
+        self.glossary.upsert_unbound_terms()
+        return out
 
     def get_profiling_run(self, run_id: str) -> dict[str, Any]:
         return self.keys.get_run(run_id)
 
     # -- definitions -----------------------------------------------------------------------------
-    def capture_definition(self, name: str, definition: str, entities: list[str] | None = None,
-                           terms: list[str] | None = None, author: str | None = None,
-                           source_ref: str | None = None) -> dict[str, Any]:
-        with span("definitions.capture", "CHAIN", {"definition.slug": slugify(name or "")}):
-            return self.definitions.upsert(name, definition, entities, terms, author, source_ref)
+    def create_definition(self, name: str, definition: str, terms: list[str] | None, document_id: str | None,
+                          location: str | None = None, author: str | None = None) -> dict[str, Any]:
+        """A business definition of existing business terms, optionally defined in an ingested policy document."""
+        with span("definitions.create", "CHAIN", {"definition.slug": slugify(name or "")}):
+            return self.definitions.create(name, definition, terms, document_id, location, author)
+
+    def update_definition(self, definition_id: str, name: str, definition: str, terms: list[str] | None,
+                          document_id: str | None, location: str | None = None,
+                          author: str | None = None) -> dict[str, Any]:
+        with span("definitions.update", "CHAIN", {"definition.slug": definition_id}):
+            return self.definitions.update(definition_id, name, definition, terms, document_id, location, author)
 
     # -- retrieval -------------------------------------------------------------------------------
-    def retrieve_context(self, query: str, top_k: int | None = None, evidence_types: list[str] | None = None,
-                         document_ids: list[str] | None = None, source_types: list[str] | None = None,
-                         structured_source_ids: list[str] | None = None, dataset_ids: list[str] | None = None,
-                         expand_parents: bool | None = None, rerank: bool | None = None) -> dict[str, Any]:
-        return self.retrieval.retrieve(query, top_k, evidence_types, document_ids, source_types,
-                                       structured_source_ids, dataset_ids, expand_parents, rerank)
-
-    def retrieve_many(self, queries: list[str], top_k: int | None = None, evidence_types: list[str] | None = None,
-                      document_ids: list[str] | None = None, source_types: list[str] | None = None,
-                      structured_source_ids: list[str] | None = None, dataset_ids: list[str] | None = None,
-                      expand_parents: bool | None = None, rerank: bool | None = None) -> dict[str, Any]:
-        """Search several queries in parallel and merge them into one deduplicated result."""
+    def retrieve_documents(self, queries: list[str], top_k: int | None = None, evidence_types: list[str] | None = None,
+                           document_ids: list[str] | None = None, source_types: list[str] | None = None,
+                           structured_source_ids: list[str] | None = None, dataset_ids: list[str] | None = None,
+                           expand_parents: bool | None = None, rerank: bool | None = None) -> dict[str, Any]:
+        """Search a list of queries in parallel and merge them into one deduplicated result."""
         return self.retrieval.retrieve_many(queries, top_k, evidence_types, document_ids, source_types,
                                             structured_source_ids, dataset_ids, expand_parents, rerank)
 
@@ -667,6 +782,13 @@ class KnowledgeMesh:
                           resource_ids=[source_id] + [t["dataset_id"] for t in out.get("tables", [])],
                           decision="denied" if denied else "allowed", reason=code)
         return out
+
+    def generate_sql(self, request: SqlGenerationRequest | dict[str, Any],
+                     structured_source_ids: list[str] | None = None,
+                     dataset_ids: list[str] | None = None) -> dict[str, Any]:
+        """One read-only SELECT written by the agent model from the evidence in ``request`` (checked, not run)."""
+        req = request if isinstance(request, SqlGenerationRequest) else SqlGenerationRequest.model_validate(request)
+        return self.sql_generator.generate(req, structured_source_ids, dataset_ids)
 
     def generate_html(self, request: HtmlRequest | dict[str, Any]) -> dict[str, Any]:
         """An escaped HTML fragment from typed content blocks (no LLM)."""
@@ -713,7 +835,7 @@ class KnowledgeMesh:
                 log.warning("agent unavailable; using direct retrieval", extra={"reason": exc.message[:300]})
                 get_metrics().agent_recoveries.add(1, {"kind": "retrieval_fallback"})
                 reason = exc.message
-        out = self.retrieve_context(query, *args)
+        out = self.retrieve_documents([query], *args)
         self.audit.record("search", caller=(context or RequestContext()).caller, resource_type="document",
                           resource_ids=[r["document_id"] for r in out["results"]], trace_id=out.get("trace_id"),
                           reason="direct retrieval")
@@ -940,6 +1062,7 @@ class KnowledgeMesh:
         for d in self.db.query("SELECT dataset_id FROM datasets WHERE active = 1"):
             self.glossary.upsert_dataset(d["dataset_id"])
             counts["datasets"] += 1
+        self.glossary.upsert_unbound_terms()
         return {**counts, "previous_indexes": moved, "document_index": self.doc_index.stats(),
                 "glossary_index": self.glossary_index.stats()}
 
@@ -1004,6 +1127,7 @@ class KnowledgeMesh:
         return {"status": status, "checks": checks, "trace_id": current_trace_id()}
 
     def close(self) -> None:
+        self.mcp_tools.close()
         self.judge.close()
         self.phoenix.close()
         self.runner.shutdown()

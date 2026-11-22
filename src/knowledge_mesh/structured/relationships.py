@@ -38,6 +38,7 @@ from ..jobs import JobContext
 from ..observability import span
 from ..storage.db import Database, dumps, loads
 from .fk_rules import FKRules, assess_foreign_key
+from .glossary_store import columns_select, datasets_select
 from .reviews import ReviewStore, lookup
 
 log = logging.getLogger(__name__)
@@ -125,11 +126,12 @@ class RelationshipGenerationService:
 
     # -- input -------------------------------------------------------------------------------------
     def _context(self, dataset_id: str) -> dict[str, Any]:
-        d = self.db.query_one("SELECT * FROM datasets WHERE dataset_id = ? AND active = 1", (dataset_id,))
+        active_dataset = datasets_select(self.db) + " WHERE d.dataset_id = ? AND d.active = 1"
+        d = self.db.query_one(active_dataset, (dataset_id,))
         if d is None:
             raise NotFound(f"dataset {dataset_id} not found or retired")
         decisions = ReviewStore(self.db).all()
-        columns = self.db.query("SELECT * FROM columns WHERE dataset_id = ? AND active = 1 ORDER BY ordinal",
+        columns = self.db.query(columns_select(self.db) + " WHERE c.dataset_id = ? AND c.active = 1 ORDER BY c.ordinal",
                                 (dataset_id,))
         terms = {}
         for c in columns:
@@ -149,13 +151,12 @@ class RelationshipGenerationService:
             if k["origin"] == "inferred" and (k["referenced_dataset_id"], k["columns_json"],
                                               k["referenced_columns_json"]) in declared:
                 continue  # profiling confirmed a declared key: the same join, proposed once
-            ref = self.db.query_one("SELECT * FROM datasets WHERE dataset_id = ? AND active = 1",
-                                    (k["referenced_dataset_id"],))
+            ref = self.db.query_one(active_dataset, (k["referenced_dataset_id"],))
             if ref is None or not entity:
                 continue
             ref_entity = ref["entity_label"] if ref.get("entity_label") and lookup(
                 decisions, "entity_mapping", ref["dataset_id"], ref["entity_slug"]) != "rejected" else None
-            if not ref_entity or slugify(ref_entity) == slugify(entity):
+            if not ref_entity or ref["entity_slug"] == d["entity_slug"]:
                 continue
             if k["origin"] == "inferred":
                 if lookup(decisions, "foreign_key", k["key_id"]) == "rejected":
@@ -168,7 +169,8 @@ class RelationshipGenerationService:
                 status = "declared"
             cols, ref_cols = loads(k["columns_json"], []), loads(k["referenced_columns_json"], [])
             fks.append({"ref": f"FK{len(fks) + 1}", "key_id": k["key_id"], "entity": entity,
-                        "ref_entity": ref_entity, "status": status,
+                        "ref_entity": ref_entity, "entity_slug": d["entity_slug"],
+                        "ref_entity_slug": ref["entity_slug"], "status": status,
                         "text": f"{d['name']}({', '.join(cols)}) -> {ref['name']}({', '.join(ref_cols)})"})
         return {"dataset": d, "entity": entity, "terms": terms, "fks": fks}
 
@@ -200,6 +202,8 @@ class RelationshipGenerationService:
             raise ValueError(f"unusable model output: {str(exc)[:200]}") from exc
         fks = {f["ref"]: f for f in ctx["fks"]}
         terms = {slug: t["label"] for slug, t in ctx["terms"].items()}
+        # the model answers with labels; a label edited in the business glossary keeps its slug
+        term_slug = {**{s: s for s in terms}, **{slugify(label): s for s, label in terms.items()}}
         rels, term_rels, synonyms = [], [], []
         seen: set[tuple[str, str]] = set()
         for r in out.relationships:
@@ -207,8 +211,9 @@ class RelationshipGenerationService:
             if fk is None:
                 issues.append(f"relationship for unknown foreign key {r.fk!r} dropped")
                 continue
-            pair = {slugify(fk["entity"]), slugify(fk["ref_entity"])}
-            src, tgt = slugify(r.source_entity), slugify(r.target_entity)
+            ends = {slugify(fk["entity"]): fk["entity_slug"], slugify(fk["ref_entity"]): fk["ref_entity_slug"]}
+            pair = {fk["entity_slug"], fk["ref_entity_slug"]}
+            src, tgt = ends.get(slugify(r.source_entity)), ends.get(slugify(r.target_entity))
             if {src, tgt} != pair or src == tgt:
                 issues.append(f"{r.fk}: entities must be {fk['entity']} and {fk['ref_entity']}")
                 continue
@@ -216,7 +221,7 @@ class RelationshipGenerationService:
             if not _NAME.match(name):
                 issues.append(f"{r.fk}: invalid relationship name {r.name!r}")
                 continue
-            labels = {slugify(fk["entity"]): fk["entity"], slugify(fk["ref_entity"]): fk["ref_entity"]}
+            labels = {fk["entity_slug"]: fk["entity"], fk["ref_entity_slug"]: fk["ref_entity"]}
             rid = relationship_id_for(src, name, tgt)
             if (rid, fk["key_id"]) in seen:
                 continue
@@ -227,7 +232,7 @@ class RelationshipGenerationService:
             card = (r.cardinality or "").strip().lower() or None
             rels.append({
                 "relationship_id": rid, "key_id": fk["key_id"], "name": name,
-                "key_direction": "forward" if src == slugify(fk["entity"]) else "reverse",
+                "key_direction": "forward" if src == fk["entity_slug"] else "reverse",
                 "source_entity_slug": src, "source_entity_label": labels[src],
                 "target_entity_slug": tgt, "target_entity_label": labels[tgt],
                 "definition": _clean(r.definition, 1000) or None,
@@ -235,7 +240,7 @@ class RelationshipGenerationService:
                 "inverse_name": inverse, "cardinality": card if card in CARDINALITIES else None,
             })
         for tr in out.term_relations:
-            subj, obj, pred = slugify(tr.subject), slugify(tr.object), tr.predicate.strip()
+            subj, obj, pred = term_slug.get(slugify(tr.subject)), term_slug.get(slugify(tr.object)), tr.predicate.strip()
             if pred not in TERM_PREDICATES:
                 issues.append(f"term relation with unknown predicate {tr.predicate!r} dropped")
                 continue
@@ -247,7 +252,7 @@ class RelationshipGenerationService:
                               "subject_label": terms[subj], "predicate": pred, "object_slug": obj,
                               "object_label": terms[obj], "definition": _clean(tr.definition, 1000) or None})
         for s in out.term_synonyms:
-            slug = slugify(s.term)
+            slug = term_slug.get(slugify(s.term))
             if slug not in terms:
                 issues.append(f"synonyms for unknown term {s.term!r} dropped")
                 continue

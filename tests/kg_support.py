@@ -12,7 +12,7 @@ import pytest
 
 from knowledge_mesh.common.ids import dataset_id_for
 from knowledge_mesh.llm.client import FakeLLM
-from tests.conftest import REPO
+from tests.conftest import REPO, prompt_columns, prompt_table
 
 SHOP_TABLES = ("customers", "orders", "products", "order_lines", "shipments", "support_tickets", "trades")
 CUSTOMERS = [("C1", "Ann Lee", "1985-03-02"), ("C2", "Bob Ray", "1992-07-15"), ("C3", "Cid Moe", "1979-11-30"),
@@ -108,8 +108,8 @@ def build_shop(path: Path) -> Path:
 
 def shop_responder(prompt: str, system, purpose: str) -> str:
     if purpose == "term_generation":
-        table = re.search(r"^Table: (.+)$", prompt, re.M).group(1).strip()
-        columns = [c.strip() for c in re.search(r"^Columns: (.+)$", prompt, re.M).group(1).split(",")]
+        table = prompt_table(prompt)
+        columns = prompt_columns(prompt)
         lines = ["```csv",
                  "<table name>,<column name>,<business term>,<sensitive>,<detailed business description>,<comments>"]
         for col in columns:
@@ -119,7 +119,7 @@ def shop_responder(prompt: str, system, purpose: str) -> str:
         lines.append("```")
         return "\n".join(lines)
     if purpose == "relationship_generation":
-        table = re.search(r"^Table: (.+)$", prompt, re.M).group(1).strip()
+        table = prompt_table(prompt)
         rels = []
         for ref, ref_table in re.findall(r"^- (FK\d+): \w+\([^)]*\) -> (\w+)\(", prompt, re.M):
             proposal = RELATIONSHIPS.get((table, ref_table))

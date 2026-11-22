@@ -101,7 +101,8 @@ def test_execute_sql_marks_columns_computed_from_sensitive_terms(shop_mesh):
 
 def test_unassessed_terms_and_unreadable_lineage(shop_mesh, monkeypatch):
     mesh = shop_mesh()
-    mesh.db.execute("UPDATE columns SET term_sensitive = NULL WHERE name = 'amount'")
+    mesh.db.execute("UPDATE business_terms SET sensitive = NULL WHERE slug IN"
+                    " (SELECT term_slug FROM columns WHERE name = 'amount')")
     assert _flags(mesh.execute_sql("shop", "SELECT amount, order_id FROM orders")) == [
         ("amount", None, []), ("order_id", False, [])]
 

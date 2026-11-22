@@ -28,7 +28,7 @@ def test_upload_index_and_status(mesh_factory):
     doc = mesh.documents.get(out["document_id"])
     assert doc["status"] == "indexed" and doc["leaf_count"] > 0
     assert doc["content_hash"] and doc["mime_type"] == "text/markdown" and doc["source_type"] == "upload"
-    res = mesh.retrieve_context("how is each customer identifier assigned", evidence_types=["documents"])
+    res = mesh.retrieve_documents(["how is each customer identifier assigned"], evidence_types=["documents"])
     top = res["results"][0]
     assert top["document_id"] == out["document_id"]
     assert top["section"] == "Customer Identification"
@@ -43,7 +43,7 @@ def test_pdf_and_docx_ingestion_with_page_citations(mesh_factory):
     docx_out = mesh.ingest_document(content=make_docx(), filename="policy.docx", wait_seconds=30)
     assert mesh.documents.get(pdf["document_id"])["status"] == "indexed"
     assert mesh.documents.get(docx_out["document_id"])["status"] == "indexed"
-    res = mesh.retrieve_context("when are refunds paid", evidence_types=["documents"])
+    res = mesh.retrieve_documents(["when are refunds paid"], evidence_types=["documents"])
     hit = next(r for r in res["results"] if r["document_id"] == pdf["document_id"])
     assert hit["page"] == 2
     page2 = mesh.read_document(pdf["document_id"], page=2)
@@ -80,18 +80,19 @@ def test_delete_removes_chunks_and_graph_context(mesh_factory):
     assert leaf_count(mesh) == 0
     assert mesh.documents.get(out["document_id"])["status"] == "deleted"
     assert mesh.graph.stats()["relationships"] == 0
-    assert mesh.retrieve_context("customer identifier", evidence_types=["documents"])["results"] == []
+    assert mesh.retrieve_documents(["customer identifier"], evidence_types=["documents"])["results"] == []
 
 
 def test_persistence_across_restart(mesh_factory, config_factory):
     cfg = config_factory()
     mesh = mesh_factory(cfg)
     out = ingest_text(mesh, POLICY)
-    mesh.capture_definition("Active Customer", "A customer with a completed order in the past 90 days.",
-                            entities=["Customer"], author="tester")
+    mesh.create_business_term("Customer Identifier", "The unique identifier of a customer")
+    mesh.create_definition("Active Customer", "A customer with a completed order in the past 90 days.",
+                           terms=["Customer Identifier"], document_id=out["document_id"], author="tester")
     mesh.close()
     restarted = mesh_factory(cfg)
-    res = restarted.retrieve_context("active customer identifier")
+    res = restarted.retrieve_documents(["active customer identifier"])
     assert any(r["document_id"] == out["document_id"] for r in res["results"])
     assert any(g["type"] == "business_definition" for g in res["graph_evidence"])
     assert restarted.documents.get(out["document_id"])["status"] == "indexed"
@@ -103,7 +104,7 @@ LONG_GUIDE = "# Guide\n" + " ".join(f"Rule {i}: customers place orders and recei
 def test_leaf_with_parent_chain(mesh_factory):
     mesh = mesh_factory()
     ingest_text(mesh, LONG_GUIDE, "guide.md")
-    res = mesh.retrieve_context("customers receive invoices", top_k=1, evidence_types=["documents"],
+    res = mesh.retrieve_documents(["customers receive invoices"], top_k=1, evidence_types=["documents"],
                                 expand_parents=True)
     top = res["results"][0]
     assert top["parent_id"].startswith("node-")
@@ -112,7 +113,7 @@ def test_leaf_with_parent_chain(mesh_factory):
     assert len(top["text"]) < len(top["parents"][0]["text"]) <= len(top["parents"][1]["text"])
     chunk = mesh.get_chunk(top["chunk_id"])
     assert [p["node_id"] for p in chunk["parents"]] == [p["node_id"] for p in top["parents"]]
-    plain = mesh.retrieve_context("customers receive invoices", evidence_types=["documents"], expand_parents=False)
+    plain = mesh.retrieve_documents(["customers receive invoices"], evidence_types=["documents"], expand_parents=False)
     assert "parents" not in plain["results"][0]
 
 
@@ -120,14 +121,14 @@ def test_parent_budget_fills_nearest_level_first_and_counts_shared_parents_once(
     mesh = mesh_factory()
     ingest_text(mesh, LONG_GUIDE, "guide.md")
     query = "customers receive invoices"
-    docs = mesh.retrieve_context(query, top_k=5, evidence_types=["documents"])["results"]
+    docs = mesh.retrieve_documents([query], top_k=5, evidence_types=["documents"])["results"]
     assert len(docs) >= 3
     level0 = {p["node_id"] for d in docs for p in d["parents"] if p["level"] == 0}
     assert len(level0) < len(docs)  # results share a 2048-token parent
     level1 = {p["node_id"]: len(p["text"]) for d in docs for p in d["parents"] if p["level"] == 1}
     needed = sum(len(d["text"]) for d in docs) + sum(level1.values())
     mesh.retrieval.cfg.max_context_tokens = -(-needed // 4)  # room for leaves + each distinct level-1 parent once
-    for d in mesh.retrieve_context(query, top_k=5, evidence_types=["documents"])["results"]:
+    for d in mesh.retrieve_documents([query], top_k=5, evidence_types=["documents"])["results"]:
         by_level = {p["level"]: p for p in d["parents"]}
         assert by_level[1]["expanded"] and by_level[1]["text"]
         assert not by_level[0]["expanded"] and by_level[0]["reason"] == "context budget exceeded"
@@ -138,16 +139,16 @@ def test_top_k_default_override_and_bounds(mesh_factory):
     mesh = mesh_factory()
     for i in range(8):
         ingest_text(mesh, f"# Note {i}\nCustomer orders note number {i} about orders and customers.", f"n{i}.md")
-    assert len(mesh.retrieve_context("customer orders", evidence_types=["documents"])["results"]) == 5
-    assert len(mesh.retrieve_context("customer orders", top_k=7, evidence_types=["documents"])["results"]) == 7
+    assert len(mesh.retrieve_documents(["customer orders"], evidence_types=["documents"])["results"]) == 5
+    assert len(mesh.retrieve_documents(["customer orders"], top_k=7, evidence_types=["documents"])["results"]) == 7
     with pytest.raises(InvalidArgument):
-        mesh.retrieve_context("customer orders", top_k=21)
+        mesh.retrieve_documents(["customer orders"], top_k=21)
 
 
 def test_insufficient_evidence(mesh_factory):
     mesh = mesh_factory()
     ingest_text(mesh, POLICY)
-    res = mesh.retrieve_context("zebra quantum xylophone telescope")
+    res = mesh.retrieve_documents(["zebra quantum xylophone telescope"])
     assert res["insufficient_evidence"] is True
     assert res["results"] == [] and res["glossary_results"] == [] and res["graph_evidence"] == []
 

@@ -39,10 +39,10 @@ def test_rebuild_indexes_after_model_change(mesh_factory, config_factory):
     import pytest
 
     with pytest.raises(IncompatibleIndex):
-        changed.retrieve_context("refunds")
+        changed.retrieve_documents(["refunds"])
     result = changed.rebuild_indexes()
     assert result["documents_indexed"] == 1 and result["previous_indexes"]["documents"].endswith(
         tuple("0123456789"))
     assert changed.doc_index.stats()["embedding_model"] == "other-model"
-    hits = changed.retrieve_context("when are refunds paid", evidence_types=["documents"])["results"]
+    hits = changed.retrieve_documents(["when are refunds paid"], evidence_types=["documents"])["results"]
     assert hits and hits[0]["document_id"] == out["document_id"]

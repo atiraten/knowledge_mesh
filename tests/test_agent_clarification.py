@@ -25,7 +25,7 @@ def executor(prompt):
         return [tools(call("query_knowledge_graph")),
                 lambda p: complete(f"Customers and their birth dates are in customers "
                                    f"[{last_result(p)['entities'][0]['id']}].")]
-    return [tools(call("retrieve_context", queries=["customer loyalty tier"])),
+    return [tools(call("retrieve_documents", queries=["customer loyalty tier"])),
             {"evaluation": "Nothing about tiers.", "action": "complete", "status": "not_found",
              "answer": "No source defines a loyalty tier.",
              "clarification_needed": "which dataset or document defines the loyalty tier"}]
@@ -120,23 +120,24 @@ def test_clarification_reply_endpoint(clarify_mesh):
 
 
 def test_executor_combines_documents_and_knowledge_graph_in_one_turn(clarify_mesh):
-    """AT-15: retrieve_context and query_knowledge_graph in the same executor turn, inside the existing loop."""
+    """AT-15: retrieve_documents and query_knowledge_graph in the same executor turn, inside the existing loop."""
     plan = {"original_query": "how do customers buy products", "decompose": False, "reasoning": "One objective.",
             "execution": "single", "intents": [{"id": "I1", "intent": "how customers buy products",
                                                 "retrieval_queries": ["customer bought product"], "depends_on": []}]}
 
     def finish(p):
         kg, docs = last_result(p, 2), last_result(p, 1)
-        return complete(f"Customers buy products through orders [{kg['paths'][0]['id']}] [{docs['documents'][0]['id']}].")
+        return complete(f"Customers buy products through orders [{kg['ranked_paths'][0]['id']}] "
+                        f"[{docs['documents'][0]['id']}].")
 
-    script = Script(plan, {"I1": [tools(call("retrieve_context", queries=["customer bought product"]),
+    script = Script(plan, {"I1": [tools(call("retrieve_documents", queries=["customer bought product"]),
                                         call("query_knowledge_graph")), finish]})
     mesh, _ = clarify_mesh(script=script)
     mesh.ingest_document(content=b"# Ordering\nA customer places orders; each order line is for one product.\n",
                          filename="ordering.md", wait_seconds=30)
     res = mesh.search("how do customers buy products")
     calls = res["tasks"][0]["steps"][0]["tool_calls"]
-    assert [c["tool"] for c in calls] == ["retrieve_context", "query_knowledge_graph"]
+    assert [c["tool"] for c in calls] == ["retrieve_documents", "query_knowledge_graph"]
     assert all(c["status"] == "ok" for c in calls)
     ids = res["tasks"][0]["evidence_ids"]
     assert any(i.startswith("D") for i in ids) and any(i.startswith("K") for i in ids)

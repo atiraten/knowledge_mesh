@@ -1,13 +1,19 @@
 # Knowledge Mesh
 
-POC that ingests documents and websites; catalogs relational databases/Parquet/Databricks sources;  discovers keys, generates a business glossary, captures business definitions, and publishes everything to an RDF knowledge graph.
-A user may query in natural language documents, databases or both. The agents searches documents, generates SQL query where applicable, runs the SQL query and returns a response grouded in evidence based on document policies and document citations along with database columns requested.
+Knowledge Mesh is a proof of concept for answering natural-language questions using documents and structured data. It indexes files and websites, catalogs relational databases, Parquet files, and Databricks sources, and builds an RDF knowledge graph that connects business terms, datasets, columns, and relationships. The search agent can retrieve document passages, traverse the graph, and run read-only SQL against supported database sources to assemble an answer with supporting evidence.
 
-*** Knowledge Mesh extracts database metadata while leaving the underlying data in place. No Data movement ***
+Source tables remain in place. Knowledge Mesh reads rows for profiling, stores metadata and column profiles locally, and can include sample values in term-generation prompts. Parquet sources support cataloging and profiling. SQL execution is available for relational database and Databricks sources.
 
-Specification: [doc/knowledge_mesh_requirements.md](doc/knowledge_mesh_requirements.md).
-Knowledge Implementation: [doc/knowledge_graph_graphrag_implementation_requirements.txt](doc/knowledge_graph_graphrag_implementation_requirements.txt).
-Agent Loop in ASD STE100: [doc/knowledge_mesh_requirements](doc/knowledge_mesh_requirements).
+
+**Knowledge Mesh extracts database metadata while leaving the underlying data in place. No Data movement**
+
+  **Specification:** [doc/knowledge_mesh_requirements.md](doc/knowledge_mesh_requirements.md).
+
+  **Knowledge Implementation:** [doc/knowledge_graph_graphrag_implementation_requirements.txt](doc/knowledge_graph_graphrag_implementation_requirements.txt).
+ 
+  **Agent Loop in ASD STE100:** [doc/knowledge_mesh_requirements](doc/knowledge_mesh_requirements).
+
+
 
 ## Quick start
 
@@ -31,6 +37,26 @@ scripts/observability.sh up | down | status | logs [service]   # only the observ
 **Model key.** The Gemini models (`term_generation`, `answer_generation` and `agent` in `config/mesh.yaml`)
 read the API key from the `GEMINI_API_KEY` environment variable, or, if it is not set, from
 `config/model.key` (a file holding only the key; it is gitignored and never committed).
+
+**How the search agent reaches its tools.** The agent harness uses the MCP server's tools only, through
+the MCP protocol. `mcp.mode` in `config/mesh.yaml` picks the connection:
+
+| `mcp.mode` | Harness connection | `/mcp` endpoint |
+|---|---|---|
+| `in_process` (default) | in-memory MCP client session to the server in the same process | not mounted |
+| `streamable_http` | MCP streamable HTTP to `mcp.url` (default `http://127.0.0.1:9801/mcp`) | mounted in the app process: one copy of the data, indexes, graph and jobs |
+
+With `streamable_http`, start the app on the port in `mcp.url` (`scripts/mesh.sh start` serves on 9801; with
+`serve`, pass `--port 9801`). Outside MCP clients can use the same endpoint:
+
+```json
+{"mcpServers": {"knowledge-mesh": {"type": "http", "url": "http://127.0.0.1:9801/mcp",
+  "headers": {"X-API-Key": "<value of KNOWLEDGE_MESH_API_KEY>"}}}}
+```
+
+The `X-API-Key` header is needed only when `KNOWLEDGE_MESH_API_KEY` is set (`/mcp` uses the same key as `/api`).
+Use `127.0.0.1` or `localhost` in the URL. `mcp.tools` lists the MCP tools offered to the executor (read-only
+tools; crawl, ingest, index, catalog and key discovery are not offered).
 
 The first indexing run downloads `sentence-transformers/all-mpnet-base-v2` (~420 MB) into the
 Hugging Face cache; after that embeddings run fully locally (set `embedding.local_files_only: true`
@@ -124,12 +150,27 @@ and null counts, format patterns (`1999-12-22 → NNNN-NN-NN`), content type, th
 (`type_category`: string, integer, decimal, date, datetime, uuid, …, shown as "Data type" next to the
 source's own "Column data type") and most common values. Profiles saved before `type_category` existed
 show it empty until the next key discovery run.
-Profiles stay in SQLite and the catalog UI, never in retrieval, prompts or logs. Unique column
+Profiles stay in SQLite and the catalog UI, never in retrieval or logs; the only prompt that sees them is
+term generation, which gets up to 5 most common values per column (not for columns whose business term is
+flagged sensitive). Unique column
 combinations come from **HyUCC** (sampling → minimal-hitting-set induction → validation in
 Apriori order); **Apriori** level-wise search is available via `profiling.ucc_algorithm` and is
-cross-checked in the tests. Non-null UCCs are flagged as primary-key candidates. **BINDER**
+cross-checked in the tests. **BINDER**
 finds unary and n-ary inclusion dependencies, which become FK candidates with their ordered
 column mapping. Every inferred key records its profiling run and scope.
+
+**Primary keys.** A table with a declared primary key gets no primary-key candidate: the declared key
+is its primary key. When FKs target primary keys (`profiling.fk_reference_primary_keys`, the default)
+it also gets no unique-key search, and inferred unique keys from earlier runs are retired at its next
+key discovery (with `false`, the search still runs because FKs may reference any unique key). For a
+table without one, the primary-key candidate is decided after the FK search:
+- **One referenced key:** a null-free unique key that other tables reference (declared FKs, or inferred
+  FKs of high or medium confidence) is the candidate; its other unique keys are only unique.
+- **Several referenced keys:** only the most referenced one is the candidate (ties: fewer columns,
+  then name order).
+- **No referenced key:** every null-free unique key stays a candidate.
+
+The candidates of the tables referenced by the FKs found in a run are recomputed in the same run.
 
 Two rules (`structured/fk_rules.py`) turn inclusions into plausible foreign keys:
 
@@ -150,7 +191,11 @@ or role-prefixed column name (or `customer_id` → `customers.id`); **low** = va
 term says one side is not an identifier. Composite FKs take their weakest column pair.
 
 **Business glossary.** For each dataset the term-generation LLM (`term_generation`, Gemini by
-default) receives only table and column names through `prompts/term_generation.txt`. Its CSV
+default) receives the table name and the column list through `prompts/term_generation.txt`: one column per
+line, `name (TYPE) ["v1" "v2"]`, with the cataloged data type and up to 5 of the column's most common profiled
+values (each cut at 60 characters; omitted when profiling stored none, and for a column whose current business
+term is flagged sensitive, so personal data already identified is not sent again). Terms are generated before
+key discovery in a catalog run, so a source's first run sends data types only. Its CSV
 output is validated against the cataloged columns: unknown columns are dropped, missing columns
 are retried once and then reported. Terms keep their description and decoding comment. Each line
 also carries a **sensitive flag** (`<table>,<column>,<term>,<Y|N>,<description>,<comments>`): Y when the
@@ -336,8 +381,8 @@ one-shot answer mode.
 
 ## Knowledge graph retrieval (`query_knowledge_graph`)
 
-One call per planner intent (MCP tool and agent tool; `graph/retriever.py`). The spec's
-`retrieve_documents` is the existing `retrieve_documents` (unchanged signature and behaviour; its graph
+One call per planner intent (MCP tool and agent tool; `graph/retriever.py`).
+`retrieve_documents` keeps its signature and behaviour (its graph
 evidence now also lists the proposed relationships and term relations, labelled with their status).
 
 1. **Resolve** each retrieval query: an IRI in the text, then exact / normalized / plural /
@@ -570,7 +615,7 @@ Set the env var named by `api.api_key_env` (default `KNOWLEDGE_MESH_API_KEY`) to
 MCP tools return bounded results with `ok`, `trace_id` and references (`job_id`, `manifest_ref`,
 `/api/...`), and structured errors. `query_knowledge_graph`, `execute_sql` and `generate_html` publish input and
 output schemas (`tool_schemas.py`); their descriptions state input, purpose and output. Document retrieval is
-`retrieve_documents` (the spec's `retrieve_documents`). They accept an optional W3C `traceparent` to join a caller's
+`retrieve_documents`. They accept an optional W3C `traceparent` to join a caller's
 trace, and `wait_seconds` to block until a job finishes. Local paths must be under
 `storage.allowed_ingest_roots`.
 
@@ -656,7 +701,8 @@ with the local embedding model, so no separate Ragas key is needed.
   share one code path; the planner uses the provider's JSON-schema output mode.
 
 - **Knowledge graph / GraphRAG requirements (doc/knowledge_graph_graphrag_implementation_requirements.txt),
-  decided with the user:** `retrieve_documents` is the spec's `retrieve_documents`; new tools have one
+  decided with the user:** the document tool was renamed from `retrieve_context` to `retrieve_documents`,
+  as in the spec; new tools have one
   implementation registered on the MCP server and in the agent tool box; SQL comes from an agent-only
   `generate_sql` tool using the agent model; `execute_sql` keeps the existing protection (API key, read-only
   session, search scope) plus a sqlglot check, for database and Databricks sources; named relationships, term
@@ -705,4 +751,6 @@ Knowledge graph / GraphRAG / MCP requirements (AT-01 … AT-23):
 | `tests/test_catalog_ui_api.py` | AT-19, AT-20 (API, static assets, app.js parse), catalog grids, generic data type, grid HTML; clicks in the browser need a walkthrough |
 | `tests/test_sensitive_data.py` | sensitive term flag (prompt, parsing, storage, migration), execute_sql lineage marking, red HTML grid, MCP |
 | `tests/test_term_review.py` | term review and correction: review rows, correction prompt, 3 rounds, blank columns, missing verdicts, audit trail |
-| `tests/test_llm_observability.py` | finish reason and thinking tokens (Gemini, OpenAI), cut-off answers on spans / metrics / logs / term runs, class words once, job → Phoenix trace link |
+| `tests/test_llm_observability.py` | finish reason and thinking tokens (Gemini, OpenAI), cut-off answers on spans / metrics / logs / term runs, provider status in failures, class words once, job → Phoenix trace link |
+| `tests/test_term_columns.py` | term prompt column list: `name (TYPE) ["v1" "v2"]`, one per line, no values for sensitive terms |
+| `tests/test_pk_candidates.py` | declared PK: no candidate / no unique-key search; referenced unique key is the PK candidate (most referenced wins; none referenced: all null-free); low-confidence FKs don't count |

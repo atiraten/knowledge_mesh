@@ -96,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "catalog":
             out = mesh.catalog_source(args.source_id, args.datasets, wait_seconds=3600)
         elif args.command == "search":
-            out = (mesh.retrieve_context(args.query, args.top_k) if args.retrieve_only
+            out = (mesh.retrieve_documents([args.query], args.top_k) if args.retrieve_only
                    else mesh.search(args.query, args.top_k))
         elif args.command == "reindex":
             out = mesh.reindex_all_documents(wait_seconds=3600)

@@ -127,15 +127,19 @@ def test_generate_html_escapes_values(shop_mesh):
 
 # -- through the agent --------------------------------------------------------------------------------
 def born_script(sql, answer):
-    def term_ids(p):
-        r = last_result(p)
-        return [t["id"] for t in r["terms"] if t["name"] == "Birth Date"] + [e["id"] for e in r["entities"]]
+    def table(p):  # the executor copies the table from get_dataset: generate_sql gets ALL the evidence it uses
+        d = last_result(p)
+        return {"name": f"{d['schema']}.{d['name']}", "keys": d["keys"],
+                "columns": [{"name": c["name"], "data_type": c.get("data_type"),
+                             "business_term": c.get("business_term")} for c in d["columns"]]}
 
     return ShopScript(plan("list customers born before 1990", ["customers born before 1990",
                                                                "customer birth date before 1990"]), {
         "I1": [tools(call("query_knowledge_graph", intent="list customers born before 1990")),
+               tools(call("find_datasets", name_contains="customers")),
+               lambda p: tools(call("get_dataset", dataset_id=last_result(p)["datasets"][0]["dataset_id"])),
                lambda p: tools(call("generate_sql", source_id="shop", intent="customers born before 1990",
-                                    evidence_ids=term_ids(p))),
+                                    tables=[table(p)], facts=["Birth Date is the customer's date of birth."])),
                lambda p: tools(call("execute_sql", source_id="shop", sql=last_result(p)["sql"])),
                lambda p: complete(answer(last_result(p)))]},
         sql={"sql": sql, "explanation": "customers.birth_date compared with 1990-01-01"}, synthesis=cite_synthesis)
@@ -147,15 +151,16 @@ def test_agent_generates_sql_with_an_llm_runs_it_and_cites_the_rows(agent_shop):
     res = mesh.search("list customers born before 1990")
     assert res["outcome"] == "answered"
     steps = [c["tool"] for s in res["tasks"][0]["steps"] for c in s["tool_calls"]]
-    assert steps == ["query_knowledge_graph", "generate_sql", "execute_sql"]
+    assert steps == ["query_knowledge_graph", "find_datasets", "get_dataset", "generate_sql", "execute_sql"]
     first = res["tasks"][0]["steps"][0]["tool_calls"][0]
     assert first["arguments"]["intent_id"] == "I1" and "retrieval_queries" in first["arguments"]
     assert "intent fields added by the harness" in first["note"]
     sql_calls = [c for c in llm.calls if c["purpose"] == "sql_generation"]
     assert len(sql_calls) == 1 and "SQL dialect: sqlite" in sql_calls[0]["prompt"]
     assert "table main.customers" in sql_calls[0]["prompt"] and "birth_date TEXT (term: Birth Date)" in sql_calls[0]["prompt"]
+    assert "Birth Date is the customer's date of birth." in sql_calls[0]["prompt"]  # only the evidence passed
     assert sql_calls[0]["system"] == (REPO / "prompts" / "sql_generation.txt").read_text().strip()
-    gen = res["tasks"][0]["steps"][1]["tool_calls"][0]
+    gen = res["tasks"][0]["steps"][3]["tool_calls"][0]
     assert gen["status"] == "ok"
     cited = {c["id"]: c for c in res["citations"]}
     rid = next(i for i in cited if i.startswith("R"))
@@ -167,21 +172,21 @@ def test_agent_sql_empty_result_and_execution_error(agent_shop):
     mesh, _ = agent_shop(born_script(BORN.replace("1990", "1900"),
                                      lambda r: f"No customer was born before 1900 [{r['id']}]."))
     res = mesh.search("list customers born before 1900")
-    exec_call = res["tasks"][0]["steps"][2]["tool_calls"][0]
+    exec_call = res["tasks"][0]["steps"][4]["tool_calls"][0]
     assert exec_call["status"] == "ok" and exec_call["summary"] == "0 rows"
     assert res["outcome"] == "answered" and "No customer" in res["tasks"][0]["answer"]
 
     mesh, _ = agent_shop(born_script("SELECT missing_column FROM customers",
                                      lambda r: "The query failed: " + r["error"]["message"]))
     res = mesh.search("list customers born before 1990")
-    exec_call = res["tasks"][0]["steps"][2]["tool_calls"][0]
+    exec_call = res["tasks"][0]["steps"][4]["tool_calls"][0]
     assert exec_call["summary"].startswith("error:") and "missing_column" in exec_call["summary"]
 
 
 def test_generate_sql_rejects_write_statements(agent_shop):
     mesh, _ = agent_shop(born_script("DELETE FROM customers", lambda r: "done"))
     res = mesh.search("list customers born before 1990")
-    gen = res["tasks"][0]["steps"][1]["tool_calls"][0]
+    gen = res["tasks"][0]["steps"][3]["tool_calls"][0]
     assert "generate_sql invalid" in gen["summary"]
     assert mesh.execute_sql("shop", "SELECT count(*) FROM customers")["rows"] == [[4]]  # nothing was deleted
 
@@ -194,7 +199,7 @@ def test_html_output_is_generated_and_returned_for_display(agent_shop):
                           blocks=[{"type": "table", "result_ref": rid}, {"type": "paragraph", "text": "<b>2</b> rows"}]))
 
     script = born_script(BORN, lambda r: "Two customers [R1].")
-    script.actions["I1"].insert(3, html_step)
+    script.actions["I1"].insert(5, html_step)
     mesh, llm = agent_shop(script)
     res = mesh.search("list customers born before 1990", output_format="html")
     assert any("Output format requested: HTML" in c["prompt"] for c in llm.calls if c["purpose"] == "agent_step")

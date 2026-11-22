@@ -33,11 +33,11 @@ shapes:BusinessDefinitionShape a sh:NodeShape ;
     sh:property [ sh:path rdfs:label ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ; sh:minLength 1 ] ;
     sh:property [ sh:path mesh:definitionText ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ;
                   sh:minLength 1 ; sh:maxLength 5000 ] ;
-    sh:property [ sh:path mesh:describes ; sh:minCount 1 ;
-                  sh:or ( [ sh:class mesh:BusinessEntity ] [ sh:class mesh:BusinessTerm ] ) ;
-                  sh:message "A business definition must describe at least one business entity or term." ] ;
-    sh:property [ sh:path mesh:author ; sh:minCount 1 ;
-                  sh:message "A business definition must retain its author or source reference." ] .
+    sh:property [ sh:path mesh:describes ; sh:minCount 1 ; sh:class mesh:BusinessTerm ;
+                  sh:message "A business definition must describe at least one business term (and only business terms)." ] ;
+    sh:property [ sh:path mesh:definedIn ; sh:maxCount 1 ; sh:nodeKind sh:IRI ;
+                  sh:message "A business definition references at most one policy document (optional)." ] ;
+    sh:property [ sh:path mesh:location ; sh:maxCount 1 ; sh:datatype xsd:string ; sh:maxLength 200 ] .
 
 shapes:RelationshipShape a sh:NodeShape ;
     sh:targetClass mesh:Relationship ;

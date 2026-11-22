@@ -128,6 +128,31 @@ class KnowledgeGraph:
     def remove(self, context: URIRef) -> None:
         self.publish(context, None)
 
+    def publish_many(self, graphs: dict[URIRef, Graph], description: str = "") -> dict[str, Any]:
+        """Validate every graph, then replace all their contexts at once (one write of the data file).
+        Nothing changes when one of them violates the shapes. An empty graph removes its context."""
+        with span("graph.publish", "CHAIN", {"graph.context": f"{len(graphs)} contexts",
+                                             "graph.triples": sum(len(g) for g in graphs.values())}) as sp:
+            for context, graph in graphs.items():
+                violations = self.validate(graph) if len(graph) else []
+                if violations:
+                    sp.set_attribute("graph.validation", "rejected")
+                    raise GraphValidationError(
+                        f"graph update for {description or context} violates {len(violations)} SHACL constraint(s); "
+                        "the previously published graph is unchanged",
+                        {"context": str(context), "violations": violations})
+            sp.set_attribute("graph.validation", "accepted")
+            with self._lock:
+                for context, graph in graphs.items():
+                    self.dataset.remove_graph(self.dataset.graph(context))
+                    if len(graph):
+                        target = self.dataset.graph(context)
+                        for triple in graph:
+                            target.add(triple)
+                self._persist()
+                self._changed()
+            return {"contexts": len(graphs), "triples": sum(len(g) for g in graphs.values()), "conforms": True}
+
     def publish_layers(self, source_id: str, layers: dict[str, Graph], description: str = "") -> dict[str, Any]:
         """Validate a structured source's layers together, then atomically replace its layer contexts (and the
         single context of the earlier layout). Empty layers remove their context."""
@@ -382,6 +407,8 @@ class KnowledgeGraph:
             return None
         def_id = str(node).rsplit(":", 1)[-1]
         describes = [{"graph_ref": str(t), "label": _str(ds.value(t, RDFS.label))} for t in ds.objects(node, MESH.describes)]
+        document = ds.value(node, MESH.definedIn)
+        document_id = str(document).rsplit(":", 1)[-1] if document is not None else None
         return {
             "type": "business_definition",
             "label": _str(ds.value(node, RDFS.label)),
@@ -391,7 +418,9 @@ class KnowledgeGraph:
             "inferred": False,
             "provenance": {"kind": "captured_definition", "definition_id": def_id,
                            "author": _str(ds.value(node, MESH.author)),
-                           "source_reference": _str(ds.value(node, MESH.sourceRef)),
+                           "document_id": document_id,
+                           "document_ref": f"/api/documents/{document_id}" if document_id else None,
+                           "location": _str(ds.value(node, MESH.location)),
                            "describes": describes},
         }
 

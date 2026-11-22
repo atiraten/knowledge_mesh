@@ -1,5 +1,5 @@
-"""MCP publication of query_knowledge_graph, execute_sql and generate_html (AT-01); retrieve_context
-(the spec's retrieve_documents) keeps its signature and behaviour (AT-14)."""
+"""MCP publication of query_knowledge_graph, execute_sql and generate_html (AT-01); retrieve_documents
+keeps its signature and behaviour (AT-14)."""
 
 import asyncio
 import json
@@ -7,14 +7,14 @@ import json
 from knowledge_mesh.mcp_server import build_server
 from tests.kg_support import shop_mesh, shop_source  # noqa: F401
 
-RETRIEVE_CONTEXT_PARAMS = {"query", "top_k", "evidence_types", "document_ids", "source_types",
-                           "structured_source_ids", "dataset_ids", "rerank", "traceparent"}
+RETRIEVE_DOCUMENTS_PARAMS = {"queries", "top_k", "evidence_types", "document_ids", "source_types",
+                           "structured_source_ids", "dataset_ids", "expand_parents", "rerank", "view", "traceparent"}
 
 
 def test_tools_are_discoverable_with_documented_schemas(shop_mesh):
     server = build_server(shop_mesh(catalog=False))
     tools = {t.name: t.model_dump(exclude_none=True) for t in asyncio.run(server.list_tools())}
-    assert {"query_knowledge_graph", "execute_sql", "generate_html", "retrieve_context"} <= set(tools)
+    assert {"query_knowledge_graph", "execute_sql", "generate_html", "retrieve_documents"} <= set(tools)
     kg = tools["query_knowledge_graph"]
     assert {"intent_id", "intent", "retrieval_queries", "max_hops", "top_k", "include_physical_mappings",
             "include_related_terms"} <= set(kg["input_schema"]["properties"])
@@ -30,7 +30,7 @@ def test_tools_are_discoverable_with_documented_schemas(shop_mesh):
     assert {"paths", "business_entities", "business_terms", "physical_mappings", "warnings"} <= set(
         tools["query_knowledge_graph"]["output_schema"]["properties"])
     assert {"status", "columns", "rows", "row_count"} <= set(tools["execute_sql"]["output_schema"]["properties"])
-    assert set(tools["retrieve_context"]["input_schema"]["properties"]) == RETRIEVE_CONTEXT_PARAMS
+    assert set(tools["retrieve_documents"]["input_schema"]["properties"]) == RETRIEVE_DOCUMENTS_PARAMS
 
 
 def test_tools_run_through_mcp(shop_mesh):
@@ -59,13 +59,13 @@ def test_tools_run_through_mcp(shop_mesh):
     assert call("generate_html", {"blocks": []})["ok"] is False
 
 
-def test_retrieve_context_behaves_as_before(shop_mesh):
-    """AT-14: same tool, same arguments, same result fields; it now also lists the proposed relationships."""
+def test_retrieve_documents_behaves_as_before(shop_mesh):
+    """AT-14: same tool, same result fields (queries is a list); it now also lists the proposed relationships."""
     mesh = shop_mesh()
     server = build_server(mesh)
-    result = asyncio.run(server.call_tool("retrieve_context", {"query": "customer birth date", "top_k": 3}))
+    result = asyncio.run(server.call_tool("retrieve_documents", {"queries": ["customer birth date"], "top_k": 3}))
     out = json.loads(result.content[0].text)
     assert out["ok"] and {"results", "glossary_results", "graph_evidence", "insufficient_evidence"} <= set(out)
     assert any(g["label"] == "Birth Date" for g in out["glossary_results"])
-    direct = mesh.retrieve_context("customer birth date", top_k=3)
+    direct = mesh.retrieve_documents(["customer birth date"], top_k=3)
     assert [g["graph_ref"] for g in direct["glossary_results"]] == [g["graph_ref"] for g in out["glossary_results"]]

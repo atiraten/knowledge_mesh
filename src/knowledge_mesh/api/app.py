@@ -1,8 +1,9 @@
 """FastAPI application: JSON API + lightweight browser UI.
 
 * Every response carries ``X-Trace-Id``; errors use ``{"error": {code, message, details}, "trace_id"}``.
-* If the environment variable named by ``api.api_key_env`` is set, ``/api/*`` requires the
+* If the environment variable named by ``api.api_key_env`` is set, ``/api/*`` (and ``/mcp``) requires the
   ``X-API-Key`` header (or ``Authorization: Bearer``). Bind to localhost otherwise.
+* With ``mcp.mode: streamable_http`` the MCP server is mounted at ``/mcp`` (same process and data).
 * Uploads enforce the configured size limit and allowed types; filenames are sanitized.
 * Originals are served with ``nosniff`` and a sandbox CSP; HTML originals are never rendered inline.
 """
@@ -16,7 +17,7 @@ import os
 import re
 import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
@@ -40,6 +41,7 @@ from ..observability.audit import RequestContext, caller_identity
 
 log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
+MCP_PATH = "/mcp"  # MCP server endpoint when mcp.mode is streamable_http
 
 
 # -- request models -----------------------------------------------------------------------------
@@ -78,12 +80,25 @@ class IndexRequest(_Model):
 
 
 class DefinitionRequest(_Model):
+    """A business definition: it references business terms only (slugs or labels of existing terms) and,
+    optionally, the ingested policy document where it is defined (and the page or section)."""
     name: str = Field(min_length=1, max_length=200)
-    definition: str = Field(max_length=5000)
-    entities: list[str] = Field(default_factory=list, max_length=50)
-    terms: list[str] = Field(default_factory=list, max_length=50)
+    definition: str = Field(min_length=1, max_length=5000)
+    terms: list[str] = Field(min_length=1, max_length=50)
+    document_id: str | None = Field(default=None, max_length=64)
+    location: str | None = Field(default=None, max_length=200)
     author: str | None = Field(default=None, max_length=200)
-    source_ref: str | None = Field(default=None, max_length=500)
+
+
+class BusinessTermRequest(_Model):
+    label: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    sensitive: bool | None = None  # can identify a person (PII / PHI / GDPR); None = not assessed
+
+
+class BusinessEntityRequest(_Model):
+    label: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
 
 
 class SourcePayload(_Model):
@@ -181,6 +196,18 @@ def _error(status: int, code: str, message: str, details: dict | None = None) ->
     return JSONResponse(body, status_code=status)
 
 
+@asynccontextmanager
+async def _mcp_endpoint(app: FastAPI, mesh: KnowledgeMesh):
+    """``mcp.mode: streamable_http``: the MCP server at ``/mcp`` in this app (same process and mesh: one copy of the
+    data, indexes, graph and jobs). The harness connects to ``mcp.url``; outside MCP clients can use it too."""
+    from ..mcp_server import build_server
+
+    server = build_server(mesh)
+    app.router.routes.extend(server.streamable_http_app(streamable_http_path=MCP_PATH).routes)
+    async with server.session_manager.run():
+        yield
+
+
 def create_app(mesh: KnowledgeMesh | None = None, config_path: str | None = None) -> FastAPI:
     owned = mesh is None
 
@@ -189,7 +216,11 @@ def create_app(mesh: KnowledgeMesh | None = None, config_path: str | None = None
         if app.state.mesh is None:
             app.state.mesh = KnowledgeMesh(load_config(config_path))
         threading.Thread(target=app.state.mesh.warmup, name="mesh-warmup", daemon=True).start()
-        yield
+        async with AsyncExitStack() as stack:
+            if app.state.mesh.config.mcp.mode == "streamable_http":
+                await stack.enter_async_context(_mcp_endpoint(app, app.state.mesh))
+            yield
+            await run_in_threadpool(app.state.mesh.mcp_tools.close)  # the harness's session, before /mcp stops
         if owned:
             app.state.mesh.close()
 
@@ -243,6 +274,9 @@ def create_app(mesh: KnowledgeMesh | None = None, config_path: str | None = None
                 response.headers.setdefault("X-Content-Type-Options", "nosniff")
                 response.headers.setdefault("Referrer-Policy", "no-referrer")
                 response.headers.setdefault("X-Frame-Options", "DENY")
+                if request.url.path == "/" or request.url.path.startswith("/static/"):
+                    # the browser re-checks the UI files on every load (304 when unchanged), so updates show at once
+                    response.headers.setdefault("Cache-Control", "no-cache")
                 if response.headers.get("content-type", "").startswith("text/html"):
                     response.headers.setdefault(
                         "Content-Security-Policy",
@@ -257,7 +291,9 @@ def create_app(mesh: KnowledgeMesh | None = None, config_path: str | None = None
     def _auth_check(request: Request) -> Response | None:
         env = m().config.api.api_key_env
         expected = os.environ.get(env) if env else None
-        if not expected or not request.url.path.startswith("/api") or request.url.path == "/api/health":
+        path = request.url.path
+        protected = path.startswith("/api") or path == MCP_PATH or path.startswith(MCP_PATH + "/")  # same key for /mcp
+        if not expected or not protected or path == "/api/health":
             return None
         if request.url.path == "/api/ops/alerts" and request.method == "POST":
             return None  # Alertmanager authenticates with its own webhook token (see receive_alerts)
@@ -477,13 +513,45 @@ def create_app(mesh: KnowledgeMesh | None = None, config_path: str | None = None
     def profiling_run(run_id: str):
         return m().get_profiling_run(run_id)
 
+    # -- business glossary: terms and entities -----------------------------------------------------------
+    def actor_of(request: Request) -> str | None:
+        return request.headers.get("x-user") or request_context(request).caller
+
+    @app.get("/api/business-terms")
+    def list_business_terms(q: str | None = None):
+        return m().list_business_terms(q)
+
+    @app.post("/api/business-terms", status_code=201)
+    def create_business_term(body: BusinessTermRequest, request: Request):
+        return m().create_business_term(body.label, body.description, body.sensitive, actor_of(request))
+
     @app.get("/api/business-terms/{slug}")
     def business_term(slug: str):
         return m().get_business_term(slug)
 
+    @app.put("/api/business-terms/{slug}")
+    def update_business_term(slug: str, body: BusinessTermRequest, request: Request):
+        return m().update_business_term(slug, body.label, body.description, body.sensitive, actor_of(request))
+
+    @app.delete("/api/business-terms/{slug}")
+    def delete_business_term(slug: str, request: Request):
+        return m().delete_business_term(slug, actor_of(request))
+
+    @app.get("/api/business-entities")
+    def list_business_entities(q: str | None = None):
+        return m().list_business_entities(q)
+
     @app.get("/api/business-entities/{slug}")
     def business_entity(slug: str):
         return m().get_business_entity(slug)
+
+    @app.put("/api/business-entities/{slug}")
+    def update_business_entity(slug: str, body: BusinessEntityRequest, request: Request):
+        return m().update_business_entity(slug, body.label, body.description, actor_of(request))
+
+    @app.delete("/api/business-entities/{slug}")
+    def delete_business_entity(slug: str, request: Request):
+        return m().delete_business_entity(slug, actor_of(request))
 
     # -- definitions -----------------------------------------------------------------------------------
     @app.get("/api/business-definitions")
@@ -491,13 +559,19 @@ def create_app(mesh: KnowledgeMesh | None = None, config_path: str | None = None
         return {"definitions": m().definitions.list()}
 
     @app.post("/api/business-definitions", status_code=201)
-    def capture_definition(body: DefinitionRequest, request: Request):
-        author = body.author or request.headers.get("x-user") or "anonymous"
-        return m().capture_definition(body.name, body.definition, body.entities, body.terms, author, body.source_ref)
+    def create_definition(body: DefinitionRequest, request: Request):
+        author = body.author or request.headers.get("x-user") or None
+        return m().create_definition(body.name, body.definition, body.terms, body.document_id, body.location, author)
 
     @app.get("/api/business-definitions/{definition_id}")
     def get_definition(definition_id: str):
         return m().definitions.get(definition_id)
+
+    @app.put("/api/business-definitions/{definition_id}")
+    def update_definition(definition_id: str, body: DefinitionRequest, request: Request):
+        author = body.author or request.headers.get("x-user") or None
+        return m().update_definition(definition_id, body.name, body.definition, body.terms, body.document_id,
+                                     body.location, author)
 
     @app.delete("/api/business-definitions/{definition_id}")
     def delete_definition(definition_id: str):
@@ -553,7 +627,7 @@ def create_app(mesh: KnowledgeMesh | None = None, config_path: str | None = None
     @app.post("/api/retrieve")
     def retrieve(body: SearchRequest):
         """Direct mixed retrieval (documents, glossary, graph) without the agent."""
-        return m().retrieve_context(body.query, body.top_k, body.evidence_types, body.document_ids,
+        return m().retrieve_documents([body.query], body.top_k, body.evidence_types, body.document_ids,
                                     body.source_types, body.structured_source_ids, body.dataset_ids,
                                     body.expand_parents, body.rerank)
 

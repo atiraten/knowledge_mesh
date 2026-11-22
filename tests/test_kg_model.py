@@ -9,6 +9,7 @@ from knowledge_mesh.common.ids import dataset_id_for
 from knowledge_mesh.graph.builders import build_source_context
 from knowledge_mesh.graph.ontology import (GLOSSARY_SCHEME, MESH, ONTOLOGY_CONTEXT, PROV, RDF, RDFS, SKOS, context_uri,
                                            layer_context_uri)
+from knowledge_mesh.structured.glossary_store import columns_select, datasets_select
 from knowledge_mesh.structured.relationships import RelationshipGenerationService
 from tests.kg_support import KG_OVERRIDES, shop_ids, shop_mesh, shop_source  # noqa: F401
 
@@ -30,10 +31,10 @@ def test_catalog_links_every_table_to_an_entity_and_every_column_to_a_term(mesh_
                         term_llm=fake_term_llm)
     for source in ("crm", "export"):
         assert mesh.catalog_source(source, wait_seconds=120)["status"] == "succeeded"
-    datasets = mesh.db.query("SELECT * FROM datasets WHERE active = 1")
+    datasets = mesh.db.query(datasets_select(mesh.db) + " WHERE d.active = 1")  # entity from the glossary
     assert {d["source_id"] for d in datasets} == {"crm", "export"}
     assert all(d["entity_label"] for d in datasets)
-    columns = mesh.db.query("SELECT * FROM columns WHERE active = 1")
+    columns = mesh.db.query(columns_select(mesh.db) + " WHERE c.active = 1")  # term from the glossary
     assert columns and all(c["term_status"] == "generated" and c["term_label"] for c in columns)
     ds = mesh.graph.dataset
     # two tables of two sources share the Customer entity

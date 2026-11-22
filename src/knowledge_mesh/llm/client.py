@@ -4,9 +4,11 @@ Providers: ``google`` (Gemini via ``google-genai``), ``openai`` (or any OpenAI-c
 endpoint through ``base_url``), and ``fake`` (tests). API keys are read from the environment
 variable ``api_key_env`` first, then from ``api_key_file``; they are never logged.
 
-Every call is traced as an OpenInference LLM span (model, token counts, latency, failures;
-prompt/response text only when ``observability.capture_sensitive_content`` is true) and
-counted in Prometheus metrics, including an estimated cost.
+Every call is traced as an OpenInference LLM span (model, token counts including thinking tokens,
+why the response ended, latency, failures; prompt/response text only when
+``observability.capture_sensitive_content`` is true) and counted in Prometheus metrics, including an
+estimated cost. A response cut off at ``max_output_tokens`` (Gemini ``MAX_TOKENS``, OpenAI ``length``) is
+marked ``truncated``, counted and logged (without its content).
 """
 
 from __future__ import annotations
@@ -31,8 +33,11 @@ class LLMResponse:
     text: str
     model: str
     input_tokens: int | None = None
-    output_tokens: int | None = None
+    output_tokens: int | None = None   # visible answer tokens
     cost_usd: float = 0.0
+    finish_reason: str | None = None   # as the provider reports it: STOP, MAX_TOKENS, SAFETY, stop, length, ...
+    thinking_tokens: int | None = None  # hidden reasoning tokens (count against max_output_tokens, billed as output)
+    truncated: bool = False            # the answer was cut off at max_output_tokens
 
 
 class LLMClient(Protocol):
@@ -85,11 +90,17 @@ class _GoogleClient:
             resp = self._client.models.generate_content(model=self.model, contents=prompt, config=cfg)
         except Exception as exc:
             if _transient(exc):
-                raise TransientError(f"{self.provider} call failed: {type(exc).__name__}") from exc
+                # the provider's status and message (e.g. 504 DEADLINE_EXCEEDED) make the failure diagnosable
+                raise TransientError(f"{self.provider} call failed: {type(exc).__name__}: {str(exc)[:200]}") from exc
             raise OperationFailed(f"{self.provider} call failed: {type(exc).__name__}: {str(exc)[:200]}") from exc
         usage = getattr(resp, "usage_metadata", None)
+        candidates = getattr(resp, "candidates", None) or []
+        reason = getattr(candidates[0], "finish_reason", None) if candidates else None
+        reason = getattr(reason, "name", None) or (str(reason) if reason is not None else None)
         return LLMResponse(resp.text or "", self.model,
-                           getattr(usage, "prompt_token_count", None), getattr(usage, "candidates_token_count", None))
+                           getattr(usage, "prompt_token_count", None), getattr(usage, "candidates_token_count", None),
+                           finish_reason=reason, thinking_tokens=getattr(usage, "thoughts_token_count", None),
+                           truncated=reason == "MAX_TOKENS")
 
 
 class _OpenAIClient:
@@ -116,15 +127,21 @@ class _OpenAIClient:
                                                         temperature=self.settings.temperature, **extra)
         except Exception as exc:
             if _transient(exc):
-                raise TransientError(f"{self.provider} call failed: {type(exc).__name__}") from exc
+                # the provider's status and message (e.g. 504 DEADLINE_EXCEEDED) make the failure diagnosable
+                raise TransientError(f"{self.provider} call failed: {type(exc).__name__}: {str(exc)[:200]}") from exc
             raise OperationFailed(f"{self.provider} call failed: {type(exc).__name__}: {str(exc)[:200]}") from exc
         usage = getattr(resp, "usage", None)
+        reason = getattr(resp.choices[0], "finish_reason", None)
+        details = getattr(usage, "completion_tokens_details", None)
         return LLMResponse(resp.choices[0].message.content or "", self.model,
-                           getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None))
+                           getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None),
+                           finish_reason=reason, thinking_tokens=getattr(details, "reasoning_tokens", None),
+                           truncated=reason == "length")
 
 
 class FakeLLM:
-    """Deterministic client for tests: ``responder(prompt, system, purpose) -> text``."""
+    """Deterministic client for tests: ``responder(prompt, system, purpose) -> text`` (or a full ``LLMResponse``,
+    e.g. to simulate a truncated answer)."""
 
     provider = "fake"
 
@@ -139,6 +156,8 @@ class FakeLLM:
         self.calls.append({"prompt": prompt, "system": system, "purpose": purpose, "json_schema": json_schema,
                            "json_output": json_output, "prompt_version": prompt_version})
         text = self.responder(prompt, system, purpose)
+        if isinstance(text, LLMResponse):
+            return text
         return LLMResponse(text, self.model, len(prompt) // 4, len(text) // 4)
 
 
@@ -206,15 +225,28 @@ class InstrumentedLLM:
                 elapsed = time.perf_counter() - start
                 metrics.llm_latency.record(elapsed, {"purpose": purpose, "model": self.model})
             metrics.llm_requests.add(1, {"purpose": purpose, "model": self.model, "status": status})
-            tin, tout = resp.input_tokens or 0, resp.output_tokens or 0
+            tin, tout, think = resp.input_tokens or 0, resp.output_tokens or 0, resp.thinking_tokens or 0
             metrics.llm_tokens.add(tin, {"purpose": purpose, "direction": "input"})
             metrics.llm_tokens.add(tout, {"purpose": purpose, "direction": "output"})
-            cost = tin / 1000 * self.settings.input_cost_per_1k_tokens + tout / 1000 * self.settings.output_cost_per_1k_tokens
+            if think:
+                metrics.llm_tokens.add(think, {"purpose": purpose, "direction": "thinking"})
+            # thinking tokens are billed as output tokens
+            cost = (tin / 1000 * self.settings.input_cost_per_1k_tokens
+                    + (tout + think) / 1000 * self.settings.output_cost_per_1k_tokens)
             if cost:
                 metrics.llm_cost.add(cost, {"purpose": purpose, "model": self.model})
             sp.set_attribute("llm.token_count.prompt", tin)
             sp.set_attribute("llm.token_count.completion", tout)
-            sp.set_attribute("llm.token_count.total", tin + tout)
+            sp.set_attribute("llm.token_count.completion_details.reasoning", think)
+            sp.set_attribute("llm.token_count.total", tin + tout + think)
+            if resp.finish_reason:
+                sp.set_attribute("llm.finish_reason", str(resp.finish_reason))
+            sp.set_attribute("llm.output_truncated", bool(resp.truncated))
+            if resp.truncated:
+                metrics.llm_truncated.add(1, {"purpose": purpose, "model": self.model})
+                log.warning("LLM output cut off at max_output_tokens",
+                            extra={"purpose": purpose, "model": self.model, "max_output_tokens":
+                                   self.settings.max_output_tokens, "output_tokens": tout, "thinking_tokens": think})
             sp.set_attribute("llm.estimated_cost_usd", cost)
             sp.set_attribute("llm.retries", attempts)
             if capture_sensitive():

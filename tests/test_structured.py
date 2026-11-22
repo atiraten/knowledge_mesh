@@ -1,3 +1,4 @@
+import re
 import sqlite3
 
 import pyarrow as pa
@@ -116,12 +117,12 @@ def test_term_generation_glossary_and_graph(crm_mesh):
     assert col["business_term"]["explanation"] == "customer_id=customer identifier"
     assert all(c["business_term"] for c in cust["columns"])
 
-    res = mesh.retrieve_context("customer identifier", evidence_types=["glossary"])
+    res = mesh.retrieve_documents(["customer identifier"], evidence_types=["glossary"])
     top = res["glossary_results"][0]
     assert top["label"] == "Customer Identifier" and top["type"] == "business_term"
     assert top["catalog_ref"].startswith("catalog:crm/main/") or top["catalog_ref"].startswith("catalog:")
     assert top["score_type"] == "cosine_similarity"
-    ent = mesh.retrieve_context("customer business entity", evidence_types=["glossary"])["glossary_results"]
+    ent = mesh.retrieve_documents(["customer business entity"], evidence_types=["glossary"])["glossary_results"]
     assert any(g["type"] == "business_entity" and g["label"] == "Customer" for g in ent)
     term = mesh.get_business_term("customer-identifier")
     assert {c["catalog_ref"] for c in term["columns"]} >= {"catalog:crm/main/customers/customer_id"}
@@ -172,7 +173,7 @@ def test_structured_refresh_is_idempotent_and_retires_stale(crm_mesh, tmp_path):
     cust = mesh.get_dataset(ds_id("crm", "main", "customers"))
     assert "region" not in [c["name"] for c in cust["columns"]]
     assert mesh.get_dataset(ds_id("crm", "main", "stores"))["active"] is False
-    labels = {g["column"] for g in mesh.retrieve_context("customer region code", top_k=20,
+    labels = {g["column"] for g in mesh.retrieve_documents(["customer region code"], top_k=20,
                                                           evidence_types=["glossary"])["glossary_results"]}
     assert "region" not in labels
     sales_keys = keys_of(mesh, ds_id("crm", "main", "sales"))
@@ -185,7 +186,9 @@ def test_prompt_rendering_and_output_validation():
 
     settings = TermGenerationSettings(industry_name="Retail", class_words=["Identifier", "Name"])
     prompt = render_prompt(template, "cust", ["cust_id", "fst_nm"], settings, {"cust": "customer"})
-    assert "Table: cust" in prompt and "Columns: cust_id, fst_nm" in prompt and "cust=customer" in prompt
+    # the prompt file may write its labels as plain text or markdown (*Table:*)
+    assert re.search(r"\*{0,2}Table:\*{0,2} cust\n", prompt) and re.search(r"\*{0,2}Columns:\*{0,2} cust_id, fst_nm", prompt)
+    assert "cust=customer" in prompt
     assert "{" not in prompt.replace("{industry", "")  # every placeholder filled
     text = ("Customer,cust_id,Customer Identifier,The id, unique per customer,cust=customer | id=identifier\n"
             "Customer,unknown_col,Ghost,x,y\n"

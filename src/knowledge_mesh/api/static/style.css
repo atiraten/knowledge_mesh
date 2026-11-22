@@ -15,8 +15,7 @@ header { display: flex; align-items: center; gap: 24px; padding: 10px 20px; back
 nav { display: flex; gap: 4px; flex-wrap: wrap; }
 nav a { color: var(--muted); text-decoration: none; padding: 6px 10px; border-radius: 6px; }
 nav a.active, nav a:hover { color: var(--accent); background: var(--accent-soft); }
-.health { margin-left: auto; font-size: 12px; color: var(--muted); }
-.settings-link { color: var(--muted); text-decoration: none; padding: 6px 10px; border-radius: 6px;
+.settings-link { margin-left: auto; color: var(--muted); text-decoration: none; padding: 6px 10px; border-radius: 6px;
                  border: 1px solid var(--line); white-space: nowrap; }
 .settings-link.active, .settings-link:hover { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
 .kind-picker { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
@@ -65,6 +64,7 @@ input.invalid, select.invalid, textarea.invalid { border-color: var(--bad); box-
 
 /* catalog facet tree, context menu, knowledge graph view, reviews, HTML output, clarification */
 /* The facet stays in view (sticky) on every catalog page; the selected element is shown in .catalog-main. */
+main:has(> .catalog-layout) { max-width: none; }  /* catalog pages use the full window width, as the header does */
 .catalog-layout { display: grid; grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); gap: 14px; align-items: start; }
 .facet { position: sticky; top: 64px; z-index: 1; max-height: calc(100vh - 90px); overflow: auto; }
 @media (max-width: 760px) { .catalog-layout { grid-template-columns: minmax(0, 1fr); } .facet { max-height: 38vh; } }
@@ -95,7 +95,17 @@ button.caret { background: transparent; border: none; color: var(--muted); paddi
 .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
 button.tiny { padding: 1px 6px; font-size: 11px; margin-left: 4px; }
 .review { white-space: nowrap; }
+/* dataset columns grid: line 1 the business term and its sensitive flag, line 2 its review status and buttons */
+.term-review { display: flex; align-items: center; gap: 4px; margin-top: 4px; white-space: nowrap; }
+.term-review .review { display: flex; gap: 4px; }
+.term-review .badge { margin-right: 0; } .term-review button.tiny { margin-left: 0; }
 label.inline { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--text); font-size: 13px; }
 .html-output { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 8px; overflow-x: auto; }
 .html-output table { margin: 6px 0; } .html-output caption { text-align: left; color: var(--muted); font-size: 12px; }
 .clarify { border-color: var(--warn); }
+/* tabs: Document Ingestion (Documents, URLs) and a table (Dataset Metadata, Profile) */
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
+.tab { padding: 7px 14px; color: var(--muted); text-decoration: none; border: 1px solid transparent; border-bottom: none;
+       border-radius: 6px 6px 0 0; margin-bottom: -1px; }
+.tab:hover { color: var(--accent); }
+.tab.active { color: var(--accent); background: var(--panel); border-color: var(--line); }

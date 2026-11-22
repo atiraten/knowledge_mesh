@@ -331,6 +331,8 @@ class Metrics:
         self.retrieval_results = m.create_histogram("mesh_retrieval_results", description="Results per index")
         self.llm_requests = m.create_counter("mesh_llm_requests", description="LLM calls by purpose and status")
         self.llm_tokens = m.create_counter("mesh_llm_tokens", description="LLM tokens by purpose and direction")
+        self.llm_truncated = m.create_counter("mesh_llm_truncated_responses",
+                                              description="LLM answers cut off at max_output_tokens, by purpose and model")
         self.llm_cost = m.create_counter("mesh_llm_estimated_cost_usd", description="Estimated LLM spend")
         self.llm_latency = m.create_histogram("mesh_llm_latency", unit="s", description="LLM call latency")
         self.guardrail_events = m.create_counter("mesh_guardrail_events", description="Guardrail signals by kind")

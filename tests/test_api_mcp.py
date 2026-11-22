@@ -12,7 +12,7 @@ from tests.test_crawler import resolver, site_handler
 from tests.test_loaders_chunking import make_pdf
 
 SPEC_TOOLS = {"crawl_website", "ingest_document", "index_documents", "read_document",
-              "extract_structured_metadata", "discover_keys", "retrieve_context"}
+              "extract_structured_metadata", "discover_keys", "retrieve_documents"}
 
 
 @pytest.fixture
@@ -101,12 +101,35 @@ def test_structured_catalog_definitions_and_mixed_search(client):
     detail = client.get(f"/api/datasets/{ds['dataset_id']}").json()
     term = detail["columns"][0]["business_term"]
     assert client.get(term["ref"]).status_code == 200
-    d = client.post("/api/business-definitions", json={"name": "Active Customer", "definition": "Ordered in 90 days.",
-                                                         "entities": ["Customer"]}, headers={"X-User": "alice"})
+    doc = client.mesh.ingest_document(content=b"# Customer policy\nAn active customer ordered in 90 days.",
+                                      filename="policy.md", wait_seconds=30)
+    body = {"name": "Active Customer", "definition": "Ordered in 90 days.", "terms": [term["slug"]],
+            "document_id": doc["document_id"], "location": "section 1"}
+    d = client.post("/api/business-definitions", json=body, headers={"X-User": "alice"})
     assert d.status_code == 201 and d.json()["author"] == "alice"
-    assert client.get("/api/business-definitions/active-customer").json()["name"] == "Active Customer"
-    bad = client.post("/api/business-definitions", json={"name": "Orphan", "definition": "x"})
-    assert bad.status_code == 422 and bad.json()["error"]["code"] == "graph_validation_failed"
+    got = client.get("/api/business-definitions/active-customer").json()
+    assert got["name"] == "Active Customer" and [t["slug"] for t in got["terms"]] == [term["slug"]]
+    assert got["document"]["document_id"] == doc["document_id"] and got["location"] == "section 1"
+    # terms only: entities are not accepted; a definition needs an existing term and its policy document
+    assert client.post("/api/business-definitions", json={**body, "name": "Orphan", "entities": ["Customer"]}
+                       ).status_code == 422
+    unknown = client.post("/api/business-definitions", json={**body, "name": "Orphan", "terms": ["nope"]})
+    assert unknown.status_code == 400 and unknown.json()["error"]["details"]["unknown_terms"] == ["nope"]
+    unknown_doc = client.post("/api/business-definitions", json={**body, "name": "Orphan", "document_id": "doc-missing"})
+    assert unknown_doc.status_code == 400
+    # the policy document is optional (a location needs one)
+    no_doc = client.post("/api/business-definitions", json={"name": "Prospect", "definition": "Never ordered.",
+                                                            "terms": [term["slug"]]})
+    assert no_doc.status_code == 201 and no_doc.json()["document"] is None and no_doc.json()["location"] is None
+    assert client.post("/api/business-definitions", json={"name": "Lead", "definition": "x", "terms": [term["slug"]],
+                                                          "location": "page 2"}).status_code == 400
+    assert client.post("/api/business-definitions", json=body).status_code == 409  # same name again
+    edited = client.put("/api/business-definitions/active-customer", json={**body, "name": "Active Buyer"}).json()
+    assert edited["definition_id"] == "active-customer" and edited["name"] == "Active Buyer"
+    blocked = client.delete(term["ref"])
+    assert blocked.status_code == 409 and blocked.json()["error"]["details"]["definitions"][0]["definition_id"] \
+        == "active-customer"
+    client.put("/api/business-definitions/active-customer", json=body)
     s = client.post("/api/search", json={"query": "active customer identifier"}).json()
     assert s["glossary_results"] and any(g["type"] == "business_definition" for g in s["graph_evidence"])
 
@@ -151,12 +174,12 @@ def test_mcp_tools_registered_and_bounded(client):
     keys = call("discover_keys", {"dataset_ids": ids, "wait_seconds": 60})
     assert keys["ok"] and keys["result"]["profiling_ref"] and keys["result"]["inferred_unique_keys"] > 0
     assert "most_common_values" not in json.dumps(keys)  # raw profiling values stay out of tool results
-    res = call("retrieve_context", {"query": "account payments customer", "top_k": 3})
+    res = call("retrieve_documents", {"queries": ["account payments customer"], "top_k": 3})
     assert res["ok"] and len(res["results"]) <= 3
     err = call("read_document", {"document_id": "doc-nope"})
     assert err["ok"] is False and err["error"]["code"] == "not_found"
     blocked = call("crawl_website", {"url": "http://127.0.0.1:8080/"})
     assert blocked["error"]["code"] == "blocked_url"
     tp = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
-    traced = call("retrieve_context", {"query": "account", "traceparent": tp})
+    traced = call("retrieve_documents", {"queries": ["account"], "traceparent": tp})
     assert traced["trace_id"] == "0af7651916cd43dd8448eb211c80319c"

@@ -132,11 +132,26 @@ TERMS = {
 DECODED = {"customers": "Customer", "orders": "Order", "cust": "Customer", "stores": "Store", "sales": "Sale"}
 
 
+def prompt_table(prompt: str) -> str:
+    """Table name of a prompt: ``Table: x``, markdown ``*Table:* x``, or a ``### Table:`` heading with the
+    name on the next line."""
+    return re.search(r"^(?:#+[ \t]*)?\*{0,2}Table:\*{0,2}[ \t]*\n?[ \t]*(\S[^\n]*)", prompt, re.M).group(1).strip()
+
+
+def prompt_columns(prompt: str) -> list[str]:
+    """Column names of a term generation prompt: one per line (``name (TYPE) ["v1" "v2"]``) or a comma list."""
+    label = r"^\*{0,2}Columns:\*{0,2}[ \t]*"
+    block = re.search(label + r"\n(.+?)(?:\n[ \t]*\n|\n###|\Z)", prompt, re.S | re.M)
+    if block:
+        return [re.split(r" \(| \[", line.strip(), maxsplit=1)[0] for line in block.group(1).splitlines() if line.strip()]
+    return [c.strip() for c in re.search(label + r"(.+)$", prompt, re.M).group(1).split(",")]
+
+
 def fake_term_responder(prompt: str, system, purpose: str) -> str:
     if purpose != "term_generation":
         return "{}"
-    table = re.search(r"^Table: (.+)$", prompt, re.M).group(1).strip()
-    columns = [c.strip() for c in re.search(r"^Columns: (.+)$", prompt, re.M).group(1).split(",")]
+    table = prompt_table(prompt)
+    columns = prompt_columns(prompt)
     lines = ["```csv", "<table name>,<column name>,<business term>,<detailed business description>,<comments>"]
     for col in columns:
         term, desc = TERMS.get(col, (col.replace("_", " ").title(), f"Value of {col}"))

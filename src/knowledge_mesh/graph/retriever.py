@@ -22,7 +22,7 @@ Steps for one request (``KGQueryRequest``):
    edges rank after paths that use none (fewer navigational edges first). Scores are uncalibrated.
 4. **Expand** the top paths and resolved concepts with definitions, aliases, mapped tables/columns,
    ordered FK column pairs, join predicates, keys and term relations, plus references to the definitions
-   and passages that mention them (IDs only; documents stay in ``retrieve_context``).
+   and passages that mention them (IDs only; documents stay in ``retrieve_documents``).
 
 The result describes schema-level connectivity (``assertion_level: "schema"``): it says how data could
 be joined, never that a particular record exists. Missing mappings are reported, never invented.
@@ -895,7 +895,7 @@ class KnowledgeGraphRetriever:
             out["truncated"] = truncated
         limit = self.cfg.max_response_chars
         if size() > limit:  # a single path still too long: shorten long texts, never drop the best path
-            from ..agent.tools import _cut_strings, _strings
+            from ..agent.mcp_client import _cut_strings, _strings
 
             cap = max((len(x) for x in _strings(out)), default=0)
             while size() > limit and cap > 80:

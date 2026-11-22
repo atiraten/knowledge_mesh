@@ -128,10 +128,13 @@ def _render(item: EvidenceItem, printed: dict[str, str]) -> tuple[str, dict[str,
         return (f"[{ident}] HTML fragment generated for web display ({d.get('blocks_rendered')} block(s)"
                 f"{', truncated' if d.get('truncated') else ''}); it shows content from the cited evidence."), entry
     if item.kind == "business_definition":
-        links = ", ".join([e["label"] for e in d.get("entities", [])] + [t["label"] for t in d.get("terms", [])])
+        links = ", ".join(t["label"] for t in d.get("terms", []))
         text = f"[{ident}] business definition '{d['name']}': {d['definition']}"
         if links:
-            text += f" (describes: {links})"
+            text += f" (defines: {links})"
+        if d.get("document"):
+            text += f" (defined in: {d['document'].get('title') or d['document']['document_id']}" \
+                    + (f", {d['location']}" if d.get("location") else "") + ")"
         return text, {"type": "business_definition", "ref": d["ref"], "graph_ref": d.get("graph_ref"),
                       "label": d["name"]}
     # business_term / business_entity

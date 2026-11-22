@@ -15,6 +15,7 @@ from rdflib.namespace import XSD
 from ..common.ids import slugify, stable_hash
 from ..storage.db import Database, dumps, loads
 from ..structured.fk_rules import FKRules, assess_foreign_key
+from ..structured.glossary_store import GlossaryStore, columns_select, datasets_select
 from ..structured.reviews import ReviewStore, combine, lookup
 from .ontology import (DCTERMS, GLOSSARY_SCHEME, MESH, OWL, PROV, RDF, RDFS, SKOS, entity_uri, predicate_uri,
                        property_uri, term_predicate, term_uri, uri)
@@ -37,18 +38,20 @@ def _lit(value: Any) -> Literal:
     return Literal(str(value), datatype=XSD.string)
 
 
-def _entity(g: Graph, label: str) -> URIRef:
-    """A business entity type: an OWL class (also typed mesh:BusinessEntity)."""
-    node = entity_uri(slugify(label))
+def _entity(g: Graph, label: str, slug: str | None = None) -> URIRef:
+    """A business entity type: an OWL class (also typed mesh:BusinessEntity). ``slug``: its glossary slug
+    (kept when the label is edited); derived from the label when not given."""
+    node = entity_uri(slug or slugify(label))
     g.add((node, RDF.type, MESH.BusinessEntity))
     g.add((node, RDF.type, OWL.Class))
     g.add((node, RDFS.label, _lit(label)))
     return node
 
 
-def _term(g: Graph, label: str) -> URIRef:
-    """A governed business term: a SKOS concept of the glossary scheme (also typed mesh:BusinessTerm)."""
-    node = term_uri(slugify(label))
+def _term(g: Graph, label: str, slug: str | None = None) -> URIRef:
+    """A governed business term: a SKOS concept of the glossary scheme (also typed mesh:BusinessTerm).
+    ``slug``: its glossary slug (kept when the label is edited); derived from the label when not given."""
+    node = term_uri(slug or slugify(label))
     g.add((node, RDF.type, MESH.BusinessTerm))
     g.add((node, RDF.type, SKOS.Concept))
     g.add((node, RDFS.label, _lit(label)))
@@ -86,13 +89,13 @@ def build_document_context(document: dict[str, Any], chunks: dict[str, dict[str,
         return node
 
     for m in mentions:
-        ent = _entity(g, m.label)
+        ent = _entity(g, m.label, m.slug)
         g.add((ent, MESH.mentionedIn, passage(m.chunk_id)))
     for r in relationships:
         node = uri("relationship", r.relationship_id)
         g.add((node, RDF.type, MESH.Relationship))
-        g.add((node, MESH.sourceEntity, _entity(g, r.source_label)))
-        g.add((node, MESH.targetEntity, _entity(g, r.target_label)))
+        g.add((node, MESH.sourceEntity, _entity(g, r.source_label, r.source_slug)))
+        g.add((node, MESH.targetEntity, _entity(g, r.target_label, r.target_slug)))
         g.add((node, MESH.relationshipType, _lit(r.rel_type)))
         g.add((node, RDFS.label, _lit(f"{r.source_label} {r.rel_type} {r.target_label}")))
         g.add((node, PROV.wasDerivedFrom, passage(r.chunk_id)))
@@ -123,13 +126,14 @@ def build_source_layers(db: Database, source_id: str, fk_rules: FKRules | None =
     (the same threshold as the relationship stage)."""
     phys, sem, mp = _g(), _g(), _g()
     layers = {"physical": phys, "semantic": sem, "mapping": mp}
-    datasets = db.query("SELECT * FROM datasets WHERE source_id = ? AND active = 1", (source_id,))
+    datasets = db.query(datasets_select(db) + " WHERE d.source_id = ? AND d.active = 1", (source_id,))
     if not datasets:
         return layers
     decisions = decisions if decisions is not None else ReviewStore(db).all()
+    term_labels, entity_labels = GlossaryStore(db).labels()
     ds_ids = [d["dataset_id"] for d in datasets]
     marks = ",".join("?" * len(ds_ids))
-    columns = db.query(f"SELECT * FROM columns WHERE dataset_id IN ({marks}) AND active = 1", ds_ids)
+    columns = db.query(columns_select(db) + f" WHERE c.dataset_id IN ({marks}) AND c.active = 1", ds_ids)
     keys = db.query(f"SELECT * FROM keys WHERE dataset_id IN ({marks}) AND active = 1", ds_ids)
     col_by_ds_name = {(c["dataset_id"], c["name"]): c for c in columns}
     ds_by_id = {d["dataset_id"]: d for d in datasets}
@@ -160,15 +164,15 @@ def build_source_layers(db: Database, source_id: str, fk_rules: FKRules | None =
             phys.add((node, MESH.dataType, _lit(c["data_type"])))
         return node
 
-    # entities of the source's tables (None when the table -> entity link is rejected)
-    entity_of: dict[str, str | None] = {}
+    # entities (slug, label) of the source's tables (absent when the table -> entity link is rejected)
+    entity_of: dict[str, tuple[str, str]] = {}
     term_entities: dict[str, set[str]] = {}
     for d in datasets:
         if d.get("entity_label") and lookup(decisions, "entity_mapping", d["dataset_id"], d["entity_slug"]) != "rejected":
-            entity_of[d["dataset_id"]] = d["entity_label"]
+            entity_of[d["dataset_id"]] = (d["entity_slug"], d["entity_label"])
             for c in (x for x in columns if x["dataset_id"] == d["dataset_id"]):
                 if c.get("term_label") and c.get("term_status") == "generated":
-                    term_entities.setdefault(c["term_slug"], set()).add(slugify(d["entity_label"]))
+                    term_entities.setdefault(c["term_slug"], set()).add(d["entity_slug"])
 
     term_slugs: set[str] = set()
     for d in datasets:
@@ -178,7 +182,7 @@ def build_source_layers(db: Database, source_id: str, fk_rules: FKRules | None =
         ent = None
         if d.get("entity_label"):
             status = lookup(decisions, "entity_mapping", d["dataset_id"], d["entity_slug"])
-            node = _entity(sem, d["entity_label"])
+            node = _entity(sem, d["entity_label"], d["entity_slug"])
             em = uri("entity-mapping", d["dataset_id"])
             mp.add((em, RDF.type, MESH.EntityMapping))
             mp.add((em, MESH.dataset, dnode))
@@ -197,7 +201,7 @@ def build_source_layers(db: Database, source_id: str, fk_rules: FKRules | None =
             if not (c.get("term_label") and c.get("term_status") == "generated"):
                 continue
             status = lookup(decisions, "term_mapping", c["column_id"], c["term_slug"])
-            term = _term(sem, c["term_label"])
+            term = _term(sem, c["term_label"], c["term_slug"])
             term_slugs.add(c["term_slug"])
             prop = property_uri(c["term_slug"])  # the attribute meaning, separate from the SKOS concept
             sem.add((prop, RDF.type, OWL.DatatypeProperty))
@@ -205,6 +209,8 @@ def build_source_layers(db: Database, source_id: str, fk_rules: FKRules | None =
             sem.add((term, MESH.termProperty, prop))
             if c.get("term_description"):
                 sem.add((term, SKOS.definition, _lit(c["term_description"])))
+            if c.get("term_sensitive") is not None:
+                sem.add((term, MESH.sensitive, _lit(bool(c["term_sensitive"]))))
             if ent is not None and status != "rejected":
                 sem.add((term, MESH.termOfEntity, ent))
                 if len(term_entities.get(c["term_slug"], ())) == 1:  # several entities: no single OWL domain
@@ -243,7 +249,7 @@ def build_source_layers(db: Database, source_id: str, fk_rules: FKRules | None =
         ref_ds, ref_col_rows, ref_cols = None, {}, []
         if k["key_type"] == "foreign":
             ref_cols = loads(k["referenced_columns_json"], [])
-            ref_ds = db.query_one("SELECT * FROM datasets WHERE dataset_id = ? AND active = 1",
+            ref_ds = db.query_one(datasets_select(db) + " WHERE d.dataset_id = ? AND d.active = 1",
                                   (k["referenced_dataset_id"],))
             if ref_ds is None:
                 continue  # referenced dataset not cataloged (or retired)
@@ -301,18 +307,18 @@ def build_source_layers(db: Database, source_id: str, fk_rules: FKRules | None =
             phys.add((knode, MESH.columnMapping, mpos))
         fk_nodes[k["key_id"]] = (knode, status, d, ref_ds)
         # Schema-level navigational edge backed by the key (no business semantics; spec 10.5).
-        dep_label = entity_of.get(d["dataset_id"])
-        ref_label = entity_of.get(ref_ds["dataset_id"]) if ref_ds["dataset_id"] in ds_by_id else (
-            ref_ds.get("entity_label") if ref_ds.get("entity_label") and lookup(
+        dep_ent = entity_of.get(d["dataset_id"])
+        ref_ent = entity_of.get(ref_ds["dataset_id"]) if ref_ds["dataset_id"] in ds_by_id else (
+            (ref_ds["entity_slug"], ref_ds["entity_label"]) if ref_ds.get("entity_label") and lookup(
                 decisions, "entity_mapping", ref_ds["dataset_id"], ref_ds.get("entity_slug")) != "rejected" else None)
-        if dep_label and ref_label and dep_label != ref_label:
+        if dep_ent and ref_ent and dep_ent[0] != ref_ent[0]:
             rel = uri("relationship", f"fk-{k['key_id']}")
             mp.add((rel, RDF.type, MESH.Relationship))
             mp.add((rel, RDF.type, MESH.NavigationalEdge))
-            mp.add((rel, MESH.sourceEntity, _entity(sem, dep_label)))
-            mp.add((rel, MESH.targetEntity, _entity(sem, ref_label)))
+            mp.add((rel, MESH.sourceEntity, _entity(sem, dep_ent[1], dep_ent[0])))
+            mp.add((rel, MESH.targetEntity, _entity(sem, ref_ent[1], ref_ent[0])))
             mp.add((rel, MESH.relationshipType, _lit("references")))
-            mp.add((rel, RDFS.label, _lit(f"{dep_label} references {ref_label}")))
+            mp.add((rel, RDFS.label, _lit(f"{dep_ent[1]} references {ref_ent[1]}")))
             mp.add((rel, PROV.wasDerivedFrom, knode))
             mp.add((rel, MESH.extractionMethod, _lit(f"{k['origin']}_foreign_key")))
             mp.add((rel, MESH.validationStatus, _lit(status)))
@@ -320,8 +326,8 @@ def build_source_layers(db: Database, source_id: str, fk_rules: FKRules | None =
     # -- named relationships proposed by the relationship stage (semantic) + join mappings --------
     def entity_slug_of(dataset: dict[str, Any]) -> str | None:
         if dataset["dataset_id"] in ds_by_id:
-            label = entity_of.get(dataset["dataset_id"])
-            return slugify(label) if label else None
+            ent = entity_of.get(dataset["dataset_id"])
+            return ent[0] if ent else None
         if dataset.get("entity_slug") and lookup(decisions, "entity_mapping", dataset["dataset_id"],
                                                  dataset["entity_slug"]) != "rejected":
             return dataset["entity_slug"]
@@ -338,13 +344,16 @@ def build_source_layers(db: Database, source_id: str, fk_rules: FKRules | None =
         r0 = rows[0]
         status = lookup(decisions, "relationship", rid)
         node = uri("relationship", f"sem-{rid}")
-        src, tgt = _entity(sem, r0["source_entity_label"]), _entity(sem, r0["target_entity_label"])
+        src_slug, tgt_slug = r0["source_entity_slug"], r0["target_entity_slug"]
+        src_label = entity_labels.get(src_slug, r0["source_entity_label"])
+        tgt_label = entity_labels.get(tgt_slug, r0["target_entity_label"])
+        src, tgt = _entity(sem, src_label, src_slug), _entity(sem, tgt_label, tgt_slug)
         sem.add((node, RDF.type, MESH.Relationship))
         sem.add((node, RDF.type, MESH.SemanticRelationship))
         sem.add((node, MESH.sourceEntity, src))
         sem.add((node, MESH.targetEntity, tgt))
         sem.add((node, MESH.relationshipType, _lit(r0["name"])))
-        sem.add((node, RDFS.label, _lit(f"{r0['source_entity_label']} {r0['name']} {r0['target_entity_label']}")))
+        sem.add((node, RDFS.label, _lit(f"{src_label} {r0['name']} {tgt_label}")))
         sem.add((node, MESH.relationshipId, _lit(rid)))
         sem.add((node, MESH.validationStatus, _lit(status)))
         sem.add((node, MESH.extractionMethod, _lit("llm_proposal")))
@@ -373,7 +382,6 @@ def build_source_layers(db: Database, source_id: str, fk_rules: FKRules | None =
             sem.add((node, PROV.wasDerivedFrom, knode))
             _join_mapping(mp, node, rid, r["key_id"], knode, "explicit", r["key_direction"],
                           _join_status(status, key_status, "explicit"))
-        src_slug, tgt_slug = slugify(r0["source_entity_label"]), slugify(r0["target_entity_label"])
         for key_id, (knode, key_status, dep, ref) in fk_nodes.items():
             if key_id in explicit_keys or key_id in weak_fks:
                 continue
@@ -391,13 +399,15 @@ def build_source_layers(db: Database, source_id: str, fk_rules: FKRules | None =
             continue
         seen_relations.add(tr["relation_id"])
         node = uri("term-relation", tr["relation_id"])
-        subj, obj = _term(sem, tr["subject_label"]), _term(sem, tr["object_label"])
+        subj_label = term_labels.get(tr["subject_slug"], tr["subject_label"])
+        obj_label = term_labels.get(tr["object_slug"], tr["object_label"])
+        subj, obj = _term(sem, subj_label, tr["subject_slug"]), _term(sem, obj_label, tr["object_slug"])
         sem.add((node, RDF.type, MESH.TermRelation))
         sem.add((node, MESH.subjectTerm, subj))
         sem.add((node, MESH.objectTerm, obj))
         sem.add((node, MESH.predicate, term_predicate(tr["predicate"])))
         sem.add((node, MESH.relationId, _lit(tr["relation_id"])))
-        sem.add((node, RDFS.label, _lit(f"{tr['subject_label']} {tr['predicate']} {tr['object_label']}")))
+        sem.add((node, RDFS.label, _lit(f"{subj_label} {tr['predicate']} {obj_label}")))
         sem.add((node, MESH.validationStatus, _lit(lookup(decisions, "term_relation", tr["relation_id"]))))
         sem.add((node, MESH.extractionMethod, _lit("llm_proposal")))
         sem.add((node, MESH.assertionLevel, _lit("descriptive")))
@@ -431,10 +441,32 @@ def build_source_context(db: Database, source_id: str, fk_rules: FKRules | None 
     return g
 
 
+# -- business glossary -------------------------------------------------------------------
+def build_glossary_context(db: Database) -> Graph:
+    """Every active business term and entity of the business glossary with its label, description and
+    (terms) sensitive flag, including terms bound to no column yet."""
+    g = _g()
+    for t in db.query("SELECT slug, label, description, sensitive, origin FROM business_terms WHERE deleted = 0"):
+        node = _term(g, t["label"], t["slug"])
+        if t["description"]:
+            g.add((node, SKOS.definition, _lit(t["description"])))
+        if t["sensitive"] is not None:
+            g.add((node, MESH.sensitive, _lit(bool(t["sensitive"]))))
+        g.add((node, MESH.origin, _lit(t["origin"])))
+    for e in db.query("SELECT slug, label, description, origin FROM business_entities WHERE deleted = 0"):
+        node = _entity(g, e["label"], e["slug"])
+        if e["description"]:
+            g.add((node, SKOS.definition, _lit(e["description"])))
+        g.add((node, MESH.origin, _lit(e["origin"])))
+    return g
+
+
 # -- definitions -------------------------------------------------------------------------
 def build_definition_context(definition_id: str, name: str, text: str, author: str | None,
-                             source_ref: str | None, entities: list[str], terms: list[str],
+                             document_id: str | None, location: str | None, terms: list[tuple[str, str]],
                              created_at: str) -> Graph:
+    """A business definition: it describes business terms (``terms``: (slug, label)) and, optionally, is
+    defined in a policy document (``mesh:definedIn``, optionally at ``location``: page or section)."""
     g = _g()
     node = uri("definition", definition_id)
     g.add((node, RDF.type, MESH.BusinessDefinition))
@@ -442,15 +474,15 @@ def build_definition_context(definition_id: str, name: str, text: str, author: s
     g.add((node, MESH.definitionText, _lit(text)))
     if author:
         g.add((node, MESH.author, _lit(author)))
-    if source_ref:
-        g.add((node, MESH.sourceRef, _lit(source_ref)))
+    if document_id:
+        g.add((node, MESH.definedIn, uri("document", document_id)))
+    if location:
+        g.add((node, MESH.location, _lit(location)))
     g.add((node, DCTERMS.created, _lit(created_at)))
-    for label in entities:
-        g.add((node, MESH.describes, _entity(g, label)))
-    for label in terms:
-        g.add((node, MESH.describes, _term(g, label)))
+    for slug, label in terms:
+        g.add((node, MESH.describes, _term(g, label, slug)))
     return g
 
 
 __all__ = ["build_document_context", "build_source_layers", "build_source_context", "build_definition_context",
-           "dumps"]
+           "build_glossary_context", "dumps"]

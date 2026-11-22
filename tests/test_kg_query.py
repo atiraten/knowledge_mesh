@@ -194,9 +194,9 @@ def test_inferred_relationships_can_be_excluded(shop_mesh):
     assert top["nodes"] == PURCHASE and top["validation_status"] == "verified"
 
 
-def test_retrieve_context_lists_the_new_relationships_with_their_status(shop):
-    res = shop.retrieve_context("customer places order", evidence_types=["graph", "glossary"])
+def test_retrieve_documents_lists_the_new_relationships_with_their_status(shop):
+    res = shop.retrieve_documents(["customer places order"], evidence_types=["graph", "glossary"])
     rels = [g for g in res["graph_evidence"] if g["type"] == "relationship" and "placesOrder" in g["label"]]
     assert rels and rels[0]["status"] == "inferred" and "status inferred" in rels[0]["text"] and rels[0]["inferred"]
-    res = shop.retrieve_context("settlement date", evidence_types=["graph", "glossary"])
+    res = shop.retrieve_documents(["settlement date"], evidence_types=["graph", "glossary"])
     assert any(g["type"] == "term_relation" and "expectedAfter" in g["label"] for g in res["graph_evidence"])

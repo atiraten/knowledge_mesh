@@ -15,7 +15,7 @@
       -> final response (prompts/synthesis.txt): one grounded answer from every task result and
          the gathered evidence; citations are checked against the evidence supplied.
 
-The first retrieve_context call of each task always searches the task's planned retrieval queries;
+The first retrieve_documents call of each task always searches the task's planned retrieval queries;
 a query_knowledge_graph call without intent_id / intent / retrieval_queries gets them from its task.
 The raw user question is not shown to the executor, so the work follows the planner's intents.
 
@@ -50,10 +50,10 @@ from ..retrieval.evidence import CITE, check_citations
 from .ledger import EvidenceLedger
 from .plan import (AgentUnavailable, Intent, IntentPlan, Planner, PlanResult, error_text, parse_json_object,
                    prompt_version, short_error, validate_plan)
-from .tools import MAX_QUERIES, SearchScope, ToolBox, ToolResult
+from .mcp_client import MAX_QUERIES, McpToolBox, SearchScope, ToolResult
 
 log = logging.getLogger(__name__)
-RETRIEVE_TOOL = "retrieve_context"
+RETRIEVE_TOOL = "retrieve_documents"
 GRAPH_TOOL = "query_knowledge_graph"
 TASK_STATUSES = ("answered", "partial", "not_found")
 UNSURE_STATUSES = ("partial", "not_found", "max_iterations")   # the executor could not answer with confidence
@@ -233,7 +233,8 @@ class TaskRun:
 
 
 class _Run:
-    def __init__(self, query: str, planned: PlanResult, tools: ToolBox, ledger: EvidenceLedger, executor_prompt: str):
+    def __init__(self, query: str, planned: PlanResult, tools: McpToolBox, ledger: EvidenceLedger,
+                 executor_prompt: str):
         self.query, self.tools, self.ledger, self.executor_prompt = query, tools, ledger, executor_prompt
         self.executor_version = prompt_version(executor_prompt)
         self.plan: IntentPlan = planned.plan
@@ -272,7 +273,7 @@ def _scope_state(scope: SearchScope | None) -> dict[str, Any] | None:
 
 class SearchHarness:
     def __init__(self, settings, llm_factory: Callable[[], Any] | None,
-                 tools_factory: Callable[[EvidenceLedger, SearchScope | None], ToolBox]):
+                 tools_factory: Callable[[EvidenceLedger, SearchScope | None], McpToolBox]):
         self.cfg = settings
         self._factory = llm_factory
         self._tools_factory = tools_factory

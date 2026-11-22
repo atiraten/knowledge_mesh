@@ -16,7 +16,8 @@ list when nothing matches) or ``error`` with a safe message. Row values are retu
 only; logs and metrics never contain them.
 
 Each result column carries ``sensitive``: true when its value is computed from a cataloged column whose
-business term can identify a person (``columns.term_sensitive``, set by the term model), with the
+business term can identify a person (``business_terms.sensitive``, set by the term model or edited in the
+business glossary), with the
 terms in ``sensitive_terms``. Lineage is read with sqlglot (aliases, expressions, CTEs, derived tables,
 scalar subqueries and UNION branches); a column used only inside ``COUNT(...)`` does not count, since a
 count reveals no value. ``false`` when every contributing column was assessed as not sensitive (or
@@ -202,8 +203,9 @@ class SqlExecutor:
         ids = [t["dataset_id"] for t in tables]
         marks = ",".join("?" * len(ids)) or "''"
         info = {(r["dataset_id"], r["name"].lower()): r for r in self.db.query(
-            f"SELECT dataset_id, name, term_label, term_sensitive FROM columns WHERE active = 1 "
-            f"AND dataset_id IN ({marks}) ORDER BY dataset_id, ordinal", ids)}
+            "SELECT c.dataset_id, c.name, t.label AS term_label, t.sensitive AS term_sensitive FROM columns c"
+            " LEFT JOIN business_terms t ON t.slug = c.term_slug AND t.deleted = 0 WHERE c.active = 1 "
+            f"AND c.dataset_id IN ({marks}) ORDER BY c.dataset_id, c.ordinal", ids)}
         try:
             lineage = _lineage(sql, dialect, tables, info)
         except Exception:  # unreadable lineage never fails the query; fall back to the output names

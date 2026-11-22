@@ -13,9 +13,10 @@ from ..graph.store import KnowledgeGraph
 from ..indexing.vector_index import PersistentVectorIndex
 from ..observability import get_metrics, span
 from ..storage.db import Database
+from ..structured.glossary_store import GlossaryStore
 from .chunking import HierarchicalChunker
 from .documents import DocumentService
-from .entities import EntityExtractor
+from .entities import EntityExtractor, Mention, Relationship
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +96,8 @@ class IndexingService:
             return {"status": "failed", "reason": f"entity extraction failed: {type(exc).__name__}"}
         chunk_info = {r["chunk_id"]: r for r in result.records}
         with self.db.transaction() as conn:
+            # glossary slugs and labels (renamed entities keep their slug); deleted entities are dropped
+            mentions, rels = GlossaryStore.resolve_document_entities(conn, mentions, rels)
             conn.execute("DELETE FROM doc_entity_mentions WHERE document_id = ?", (document_id,))
             conn.execute("DELETE FROM doc_relationships WHERE document_id = ?", (document_id,))
             conn.executemany(
@@ -111,6 +114,23 @@ class IndexingService:
         except GraphValidationError as exc:
             return {"status": "rejected", "violations": len(exc.details.get("violations", []))}
         return {"status": "published", "entities": len({m.slug for m in mentions}), "relationships": len(rels)}
+
+    def document_graph(self, document_id: str):
+        """A document's graph context rebuilt from its stored mentions and relationships (no re-extraction),
+        with the current glossary labels (None: unknown document). Used after a business entity is renamed
+        or deleted."""
+        row = self.db.query_one("SELECT * FROM documents WHERE document_id = ?", (document_id,))
+        if row is None:
+            return None
+        chunks = {r["chunk_id"]: r for r in self.db.query(
+            "SELECT chunk_id, page, section FROM chunks WHERE document_id = ?", (document_id,))}
+        mentions = [Mention(r["chunk_id"], r["label"], r["entity_slug"]) for r in self.db.query(
+            "SELECT m.chunk_id, m.entity_slug, COALESCE(e.label, m.entity_label) AS label FROM doc_entity_mentions m"
+            " LEFT JOIN business_entities e ON e.slug = m.entity_slug WHERE m.document_id = ?", (document_id,))]
+        rels = [Relationship(r["relationship_id"], r["chunk_id"], r["source_label"], r["source_slug"], r["rel_type"],
+                             r["target_label"], r["target_slug"], r["evidence"] or "", r["method"])
+                for r in self.db.query("SELECT * FROM doc_relationships WHERE document_id = ?", (document_id,))]
+        return build_document_context(row, chunks, mentions, rels)
 
     def retire_index(self, document_id: str) -> bool:
         """Remove a document's chunks from the index, chunk table and graph (other sources untouched)."""

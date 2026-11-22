@@ -144,12 +144,12 @@ def test_identifier_fks_and_confidence_follow_terms(crm_mesh_factory):
 
 
 def test_agent_dataset_tool_reports_fk_confidence(crm_mesh_factory):
-    from knowledge_mesh.agent.ledger import EvidenceLedger
-    from knowledge_mesh.agent.tools import build_search_tools
+    from knowledge_mesh.agent import EvidenceLedger, McpToolBox
 
     mesh = crm_mesh_factory()
     assert mesh.catalog_source("crm", wait_seconds=120)["status"] == "succeeded"
-    tools = build_search_tools(mesh, EvidenceLedger(), None, 20_000)
+    mesh.config.agent.max_observation_chars = 20_000
+    tools = McpToolBox(mesh.mcp_tools, mesh.config, EvidenceLedger(), None)  # the MCP tool get_dataset
     out = tools.call("get_dataset", {"dataset_id": dataset_id_for("crm", "main", "sales")}).observation
     fks = [k for k in out["keys"] if k["type"] == "foreign" and k["origin"] == "inferred"]
     assert fks and all(k["confidence"] in {"high", "medium", "low"} for k in fks)

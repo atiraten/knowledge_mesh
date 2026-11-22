@@ -8,7 +8,6 @@ The output should be in {language_name} language.
    ***Do NOT ADD ANY SEGMENT WHEN DECODING A COLUMN***
 2. **Space Separation:** The generated business term words MUST be separated by a single SPACE character. No slashes (`/`), hyphens, newline character, or formatting modifiers.
 3. **Strict Target Format:** The business term field must strictly adhere to: `[Entity Name] + [Modifier] + [Root Word] + [Class Word]`. It must be a clean noun phrase between 2 and 6 words max.
-{class_words_section}
 4. ***A word in Business Term shall appear only Once ***
 5. **Expand Acronyms:** The business term must must have expanded acronyms unless overriden by the ABBREVIATION DICTIONARY.
 6. **For each column in a table, generate the business term, its sensitive flag, the description, any optional explanantion comment in this EXACT format in ** {language_name} ** only:
@@ -21,21 +20,35 @@ The output should be in {language_name} language.
     Example: column='ln_as_of_dt' --> 'loan as of date'. loan date is INCORRECT.
     Example: column='adr_ln1' --> 'Address Line 1'. Address Line is INCORRECT. 
 12. **Sensitive Flag:** <sensitive> is Y when the business term can identify a physical person, on its own or when combined with other information; otherwise N.
-    Personal data (PII / PHI / GDPR) includes, and is not limited to: First Name, Last Name, Full Name, Address, City, Zip Code, Email, Phone Number, Date Of Birth, Place Of Birth, Date Of Marriage, Date Of Death, Social Security Number, Tax Identifier Number, National Identifier Number, Medicare Number, Medicaid Number, Medical Record Number, and any other information capable of identifying a person.
+    Personal data (PII / PHI / GDPR) includes, and is not limited to the list SENSITIVE TERMS and any other information capable of identifying a person.
     Information that identifies only a company (not a person) is N.
+
+### CLASS WORD RULES
+1. Business Term must have one class word unless the column has more than one.
+2. Class word must be present in the ALLOWED CLASS WORDS list
+3. When class word is not present in the decoded column:
+  . some classwords are implied:
+    - Example: city -> City Name
+  . Some classwords are inferred
+    - decoded column = "underwriter" -> Check the data type, content type and common values. 
+       If the data type if numeric -> `Underwriter Identifier`.
+       If the data type alphanumeric and the common values are names -> `Underwriter Name`.
+    - decoded column = "launched on" -> check the data type, content type and common values.
+       If the content type id date and the values are dates -> `Launch Date`
+    - decoded column = "balance" -> check the data type, content type and common values.
+       If the content type is a decimal and the common values looks like amounts -> `Balance Amount`
 
 ### THE ENTITY-PREFIX RULE
 For every column, decide whether the table is a Domain Entity or a Cross-Reference Record:
-- **Rule 1 (Domain Entities):** If the table represents any identifiable thing — living or inanimate — that owns its own attributes (`Patient`, `Customer`, `Employee`, `Property`, `Loan`, `Account`, `Stock`, `Vehicle`, `Asset`), you MUST prepend the decoded table name to every term.
-  - *Example:* `cust` + `fstnm` -> `Customer First Name`
-  - *Example:* `clt` + `ssn` -> `Client Social Security Number`
-  - *Example:* `property` + `state` -> `Property State Code` (the property owns its location)
+- **Rule-0 (Domain Entity Required):** if the decoded column result in one word, you must prepend the business entity.
+  - *Example:* `cust` + `id` -> `customer identifier`
+  - *Example:* `prch` + `amt` -> `purchase amount`
+  - *Example:* `trans` + `dt` -> `transaction date`
   - *Example:* `loan` + `bal` -> `Loan Balance Amount`
   - *Example:* `stock` + `price` -> `Stock Price Amount`
-  - *Example:* `item_line` + `id` -> `Item Line Identifier` (Expand the table and add it as prefix)
-    `Item Identifier Timestamp` IS INCORRECT - Timestamp is added and no segment is present.
-  - *Example:* `ln_fac' + `as_of_date`. -> Loan Facility As Of Date.
-                `Loan Facility Date` IS INCORRECT - Missing 'AS' and 'OF'
+- **Rule 1 (Domain Entities):** If the column represents a personnal identifiable information in the list SENSITIVE TERMS,  You MUST prepend the decoded table name to every term.
+  - *Example:* `cust` + `fstnm` -> `Customer First Name`
+  - *Example:* `clt` + `ssn` -> `Client Social Security Number`
 - **Rule 2 (Cross-Reference Records):** If the table records a business event or cross-references multiple entities (`Claim`, `Transaction`, `Payment`, `Invoice`, `Application`, `Corporate Action`, `Trade`, `Order`, `Dividend`, `Settlement`, `Position`, `Allocation`), retain the prefix for the record's **own structural keys, event-type codes, amounts, and dates** — but drop it for an attribute that belongs by nature to another domain.
 **Key test:** ask "does this attribute make sense without the dataset name?" — if yes drop the prefix; if no keep it.
   - *Example:* `trans` + `id` -> `Transaction Identifier` (the transaction owns its own identifier) - 
@@ -70,9 +83,15 @@ The comment should contain the decoded segments.
 **COMMA Separator between table <table name>,<column name>,<business term>,<sensitive>,<detailed business description> and <comments> is a MUST **.
 <table name>,<column name>,<business term>,<sensitive>,<detailed business description>,<comments>
 
+### SENSITIVE TERMS
+First Name, Last Name, Full Name, Address, City, Zip Code, Email, Phone Number, Date Of Birth, Place Of Birth, Date Of Marriage, Date Of Death, Social Security Number, Tax Identifier Number, National Identifier Number, Medicare Number, Medicaid Number, Medical Record Number
+
+### ALLOWED CLASS WORDS
+{class_words_section}
+
 ### COLUMNS TO GENERATE BUSINESS TERMS FOR
-Table: {table}
-Columns: {columns}
+*Table:* {table}
+*Columns:* {columns}
 
 ### ABBREVIATION DICTIONARY
 {industry_abbreviation}

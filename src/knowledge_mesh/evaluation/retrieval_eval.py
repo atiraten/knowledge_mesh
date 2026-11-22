@@ -63,7 +63,8 @@ def evaluate(mesh, testset: list[dict[str, Any]], k: int | None = None, ragas: b
     started = time.perf_counter()
     with span("evaluation.retrieval", "CHAIN", {"evaluation.questions": len(testset), "evaluation.k": k}) as sp:
         for item in testset:
-            res = mesh.retrieve_context(item["question"], top_k=k, evidence_types=["documents"], expand_parents=False)
+            res = mesh.retrieve_documents([item["question"]], top_k=k, evidence_types=["documents"],
+                                          expand_parents=False)
             use_chunks = bool(item.get("relevant_chunk_ids"))
             relevant = set(item.get("relevant_chunk_ids") or item.get("relevant_document_ids"))
             retrieved = [r["chunk_id"] if use_chunks else r["document_id"] for r in res["results"]]

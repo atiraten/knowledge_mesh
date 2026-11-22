@@ -7,6 +7,14 @@ free text are not offered to BINDER. Each inferred FK records why each side is a
 Profiling scope (recorded on every inferred key): rows evaluated, total rows when known,
 whether the result came from a sample, method (``head`` = first ``max_rows`` rows, ``full``),
 and the profiling run ID. Raw values exist only in memory during the run.
+
+Primary keys: a table with a declared primary key gets no PK candidate. When FKs target primary keys
+(``fk_reference_primary_keys``, the default) it gets no unique-key search either: its declared keys are its
+keys, so its earlier inferred unique keys are retired. (With ``fk_reference_primary_keys: false`` the search
+still runs, since FKs may then reference any unique key.) For any other table, after the FK search, a null-free
+unique key referenced by other tables (declared FKs, or inferred FKs of high or medium confidence) is the PK
+candidate: the most referenced one (ties: fewer columns, then name order); its other unique keys are only
+unique. When none is referenced, every null-free unique key stays a PK candidate.
 """
 
 from __future__ import annotations
@@ -21,13 +29,25 @@ from ..jobs import JobContext
 from ..observability import get_metrics, span
 from ..storage.db import Database, dumps, loads
 from .catalog import CatalogService
-from .fk_rules import FKRules
+from .fk_rules import FKRules, assess_foreign_key
 from .keys.binder import Binder, DatasetValues, normalize_value
 from .keys.ucc import discover_uccs, encode_table
 from .profiling import profile_column
 
 log = logging.getLogger(__name__)
 _IND_CATEGORIES = {"integer", "decimal", "string", "uuid", "date", "datetime", "time"}
+REFERENCE_LEVELS = {"high", "medium"}  # inferred FKs that count as references when choosing the PK candidate
+
+
+def choose_pk_candidates(keys: dict[tuple[str, ...], bool], references: dict[frozenset, int]) -> set[tuple[str, ...]]:
+    """PK candidates among a table's unique keys (``columns -> null-free``), given how many FKs of other tables
+    reference each column set: the most referenced null-free key (ties: fewer columns, then name order), or,
+    when none is referenced, every null-free key."""
+    eligible = [k for k, null_free in keys.items() if null_free]
+    referenced = [k for k in eligible if references.get(frozenset(k), 0) > 0]
+    if not referenced:
+        return set(eligible)
+    return {min(referenced, key=lambda k: (-references[frozenset(k)], len(k), k))}
 
 
 class KeyDiscoveryService:
@@ -134,6 +154,10 @@ class KeyDiscoveryService:
                 inferred_ids.setdefault(ind.dep_dataset, set()).add(kid)
                 counts["inferred_foreign_keys"] += 1
             self._retire_stale(inferred_ids, set(values), now)
+            # PK candidates of the profiled tables and of the tables the FKs found here reference
+            targets = list(values) + sorted({ind.ref_dataset for ind in inds} - set(values))
+            candidates = self._assign_pk_candidates(targets, now)
+            counts["primary_key_candidates"] = sum(candidates.get(ds, 0) for ds in values)
             for key_type, n in (("unique", counts["inferred_unique_keys"]), ("foreign", counts["inferred_foreign_keys"])):
                 metrics.keys.add(n, {"key_type": key_type, "origin": "inferred"})
             metrics.keys.add(counts["declared_keys"], {"key_type": "any", "origin": "declared"})
@@ -179,14 +203,20 @@ class KeyDiscoveryService:
                 " null_count, format_patterns_json, content_type, most_common_values_json, created_at, type_category)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", profile_rows)
 
-        # unique column combinations
+        declared = self.db.query("SELECT key_type, columns_json FROM keys WHERE dataset_id = ? AND origin = 'declared' "
+                                 "AND active = 1", (dataset_id,))
+        has_declared_pk = any(k["key_type"] == "primary" for k in declared)
+        # unique column combinations: not searched when the table declares its primary key and FKs may only
+        # reference primary keys (they are then useless as PK candidates and as FK targets)
         excluded = [k.lower() for k in self.cfg.key_excluded_type_keywords]
         eligible = [i for i, c in enumerate(columns)
                     if not any(x in (c["data_type"] or "").lower() for x in excluded)
                     and categories[c["name"]] not in {"float", "binary", "other"}][: self.cfg.max_columns]
         uccs: list[tuple[str, ...]] = []
         complete = True
-        if n >= self.cfg.min_rows_for_inference and eligible:
+        if has_declared_pk and self.rules.reference_primary_keys:
+            scope["ucc_search_skipped"] = "declared primary key"
+        elif n >= self.cfg.min_rows_for_inference and eligible:
             matrix = encode_table(table.select(names), self.cfg.null_equals_null)
             result = discover_uccs(matrix, eligible, self.cfg.max_key_size, self.cfg.ucc_algorithm,
                                    self.cfg.max_ucc_candidates)
@@ -196,15 +226,15 @@ class KeyDiscoveryService:
         key_ids = []
         pk_candidates = 0
         for combo in uccs:
-            pk = all(null_free[c] for c in combo)
+            combo_null_free = all(null_free[c] for c in combo)
+            pk = combo_null_free and not has_declared_pk  # refined after the FK search (_assign_pk_candidates)
             pk_candidates += int(pk)
             kid = key_id_for(dataset_id, "unique", "inferred", list(combo))
             self._upsert_inferred(kid, dataset_id, "unique", list(combo), run_id, scope,
-                                  {"matches_declared": self._declared_unique(dataset_id, combo)}, pk, None, None, now)
+                                  {"matches_declared": self._declared_unique(dataset_id, combo),
+                                   "null_free": combo_null_free}, pk, None, None, now)
             key_ids.append(kid)
 
-        declared = self.db.query("SELECT key_type, columns_json FROM keys WHERE dataset_id = ? AND origin = 'declared' "
-                                 "AND active = 1", (dataset_id,))
         unique_keys = self.rules.referenceable_keys(
             [(k["key_type"], tuple(loads(k["columns_json"], []))) for k in declared], uccs, null_free)
         ind_columns = {c["name"]: [normalize_value(v) for v in table.column(c["name"]).to_pylist()]
@@ -235,6 +265,38 @@ class KeyDiscoveryService:
                    is_pk_candidate=excluded.is_pk_candidate, active=1, updated_at=excluded.updated_at""",
             (kid, dataset_id, key_type, "inferred", dumps(columns), ref_dataset,
              dumps(ref_columns) if ref_columns else None, int(pk), run_id, dumps(scope), dumps(metrics_json), now, now))
+
+    def _assign_pk_candidates(self, dataset_ids: list[str], now: str) -> dict[str, int]:
+        """Set ``is_pk_candidate`` on the active inferred unique keys of each table (see the module docstring);
+        returns the number of PK candidates per table."""
+        out: dict[str, int] = {}
+        for ds in dict.fromkeys(dataset_ids):
+            uniques = self.db.query("SELECT key_id, columns_json, metrics_json, is_pk_candidate FROM keys "
+                                    "WHERE dataset_id = ? AND origin = 'inferred' AND key_type = 'unique' "
+                                    "AND active = 1", (ds,))
+            declared_pk = self.db.query_one("SELECT 1 FROM keys WHERE dataset_id = ? AND origin = 'declared' "
+                                            "AND key_type = 'primary' AND active = 1", (ds,)) is not None
+            chosen: set[tuple[str, ...]] = set()
+            if not declared_pk:  # a declared primary key is the PK: no candidate is computed
+                keys = {tuple(loads(k["columns_json"], [])): bool(loads(k["metrics_json"], {}).get(
+                    "null_free", k["is_pk_candidate"])) for k in uniques}
+                references: dict[frozenset, int] = {}
+                for fk in self.db.query("SELECT * FROM keys WHERE referenced_dataset_id = ? AND key_type = 'foreign' "
+                                        "AND active = 1 AND dataset_id <> ?", (ds, ds)):  # other tables only
+                    if fk["origin"] == "inferred":
+                        confidence = assess_foreign_key(self.db, fk, self.rules)
+                        if not confidence or confidence.get("level") not in REFERENCE_LEVELS:
+                            continue
+                    cols = frozenset(loads(fk["referenced_columns_json"], []))
+                    references[cols] = references.get(cols, 0) + 1
+                chosen = choose_pk_candidates(keys, references)
+            for k in uniques:
+                pk = int(tuple(loads(k["columns_json"], [])) in chosen)
+                if pk != k["is_pk_candidate"]:
+                    self.db.execute("UPDATE keys SET is_pk_candidate = ?, updated_at = ? WHERE key_id = ?",
+                                    (pk, now, k["key_id"]))
+            out[ds] = len(chosen)
+        return out
 
     def _retire_stale(self, found: dict[str, set[str]], profiled: set[str], now: str) -> None:
         for ds in profiled:

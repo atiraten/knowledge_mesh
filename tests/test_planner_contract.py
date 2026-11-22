@@ -40,7 +40,7 @@ def test_schema_keeps_the_required_field_names_and_execution_enum():
 
 
 def _search(mesh_factory, config_factory, plan):
-    llm = FakeLLM(Script(plan, {i["id"]: [tools(call("retrieve_context", queries=i["retrieval_queries"])),
+    llm = FakeLLM(Script(plan, {i["id"]: [tools(call("retrieve_documents", queries=i["retrieval_queries"])),
                                           complete("done")] for i in plan["intents"]}))
     mesh = mesh_factory(config_factory({"agent": {"enabled": True, "provider": "fake", "model": "fake", **PROMPTS,
                                                   "clarification_enabled": False}}), agent_llm=llm)

@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..storage.db import Database, loads
+from .glossary_store import columns_select
 
 DEFAULT_CLASS_WORDS = ("Identifier", "Code", "Number", "Key", "Indicator", "Flag")
 DEFAULT_NAME_TOKENS = {
@@ -193,10 +194,9 @@ def assess_foreign_key(db: Database, key: dict[str, Any], rules: FKRules | None 
     if key.get("key_type") != "foreign" or key.get("origin") != "inferred":
         return None
     rules = rules or FKRules()
-    dep_cols = {c["name"]: c for c in db.query("SELECT * FROM columns WHERE dataset_id = ? AND active = 1",
-                                               (key["dataset_id"],))}
-    ref_cols = {c["name"]: c for c in db.query("SELECT * FROM columns WHERE dataset_id = ? AND active = 1",
-                                               (key["referenced_dataset_id"],))}
+    active = columns_select(db) + " WHERE c.dataset_id = ? AND c.active = 1"
+    dep_cols = {c["name"]: c for c in db.query(active, (key["dataset_id"],))}
+    ref_cols = {c["name"]: c for c in db.query(active, (key["referenced_dataset_id"],))}
     ref_ds = db.query_one("SELECT name FROM datasets WHERE dataset_id = ?", (key["referenced_dataset_id"],))
     cols, ref = loads(key["columns_json"], []), loads(key["referenced_columns_json"], [])
     pairs = [(dep_cols[a], ref_cols[b]) for a, b in zip(cols, ref) if a in dep_cols and b in ref_cols]

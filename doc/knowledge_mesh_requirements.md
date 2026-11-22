@@ -147,7 +147,7 @@ Document passages and the business glossary SHALL use separate persistent LlamaI
 
 ### FR-07 — Retrieval
 
-1. The `retrieve_context` MCP tool SHALL search document leaf chunks and the separate index of business terms and entities by vector similarity. A single query SHALL be able to return evidence from both indexes.
+1. The `retrieve_documents` MCP tool SHALL search document leaf chunks and the separate index of business terms and entities by vector similarity. A single query SHALL be able to return evidence from both indexes.
 2. **K SHALL default to 5 per searched index**, configured under retrieval settings in **`config/mesh.yaml`**. The caller MAY override K within configured bounds and filter by evidence type or source.
 3. Document results SHALL include `chunk_id`, `document_id`, excerpt, source URL/path, available page or section, similarity score, and parent reference.
 4. Glossary results SHALL include the business label, record type, similarity score, and references to the originating table or column. The tool SHALL return relevant business definitions, relationships, and constraints by looking up business concepts in the knowledge graph. Graph evidence SHALL include provenance and respect the configured result limit.
@@ -212,7 +212,7 @@ The MCP server(s) SHALL expose the following interfaces. The application service
 | `read_document` | `document_id`, optional bounded page/section/chunk range | Bounded text, source metadata, references |
 | `extract_structured_metadata` | configured structured source ID, optional dataset selection | `job_id`, status, counts, SQLite catalog references |
 | `discover_keys` | catalog dataset IDs, optional profiling scope | `job_id`, declared and inferred key counts, profiling and catalog references |
-| `retrieve_context` | query, optional `top_k`, evidence types, and source filters | Ranked passages and glossary matches, linked graph evidence, source references |
+| `retrieve_documents` | query, optional `top_k`, evidence types, and source filters | Ranked passages and glossary matches, linked graph evidence, source references |
 
 ### MCP operational requirements
 
@@ -223,7 +223,7 @@ The MCP server(s) SHALL expose the following interfaces. The application service
 - The server SHALL validate tool parameters, restrict local paths to authorized roots, and enforce authorization on document, catalog, and graph references.
 - Tools SHALL return structured errors for invalid arguments, unavailable sources or records, and failed operations.
 
-**Example `retrieve_context` response**
+**Example `retrieve_documents` response**
 
 ```json
 {
