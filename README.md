@@ -2,10 +2,10 @@
 
 Knowledge Mesh is a Proof of Concept (PoC) for answering natural-language questions using unstructured information (documents) and structured data. It indexes files and websites, catalogs relational databases, Parquet files, and Databricks sources, and builds an RDF knowledge graph that connects business terms, datasets, columns, and relationships. The search agent can retrieve document passages, traverse the graph, and run read-only SQL against supported database sources to assemble an answer with supporting evidence.
 
-Source tables remain in place. Knowledge Mesh reads rows for profiling, stores metadata and column profiles locally, and can include sample values in term-generation prompts. Parquet sources support cataloging and profiling. SQL execution is available for relational database and Databricks sources.
-
 
 **Knowledge Mesh extracts database metadata while leaving the underlying data in place. No Data movement**
+
+  **Index** [INDEX.md](INDEX.md)
 
   **Scope:** [doc/knowledge_mesh_requirements.md](doc/knowledge_mesh_requirements.md).
 
@@ -54,7 +54,7 @@ The following 12 active customers meet this definition, having no delinquency re
 - [K1] business definition “Good Customer” source
 - [R1] query result “SQL on Loans”
 
-
+## Agent and Tools
 **How the search agent reaches its tools.** The agent harness uses the MCP server's tools only, through
 the MCP protocol. `mcp.mode` in `config/mesh.yaml` picks the connection:
 
