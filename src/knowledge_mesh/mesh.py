@@ -612,7 +612,11 @@ class KnowledgeMesh:
             return self.sources.test(payload, source_id)
 
     def get_dataset(self, dataset_id: str) -> dict[str, Any]:
-        return self.catalog.get_dataset(dataset_id)
+        d = self.catalog.get_dataset(dataset_id)
+        # Definitions link to business terms: the table's are those of its columns' terms (not rejected mappings).
+        slugs = [c["business_term"]["slug"] for c in d["columns"]
+                 if c.get("business_term") and c["business_term"].get("status") != "rejected"]
+        return {**d, "definitions": self.definitions.for_terms(slugs)}
 
     def catalog_tree(self) -> list[dict[str, Any]]:
         return [{**s, **self.catalog.source_tree(s["source_id"])} for s in self.catalog.list_sources()]

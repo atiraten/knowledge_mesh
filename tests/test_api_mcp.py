@@ -130,6 +130,9 @@ def test_structured_catalog_definitions_and_mixed_search(client):
     assert blocked.status_code == 409 and blocked.json()["error"]["details"]["definitions"][0]["definition_id"] \
         == "active-customer"
     client.put("/api/business-definitions/active-customer", json=body)
+    # the table lists the definitions of its columns' terms (the Dataset Metadata tab reads this list)
+    listed = client.get(f"/api/datasets/{ds['dataset_id']}").json()["definitions"]
+    assert [x["definition_id"] for x in listed] == ["active-customer", "prospect"]
     s = client.post("/api/search", json={"query": "active customer identifier"}).json()
     assert s["glossary_results"] and any(g["type"] == "business_definition" for g in s["graph_evidence"])
 

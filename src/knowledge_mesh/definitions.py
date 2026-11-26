@@ -166,12 +166,19 @@ class DefinitionService:
         return [self.get(r["definition_id"]) for r in rows]
 
     def for_term(self, slug: str) -> list[dict[str, Any]]:
+        return self.for_terms([slug])
+
+    def for_terms(self, slugs: list[str]) -> list[dict[str, Any]]:
+        """Active definitions that reference any of these business terms, once each, by name."""
+        slugs = sorted(set(slugs))
+        if not slugs:
+            return []
         return [{"definition_id": r["definition_id"], "name": r["name"],
                  "ref": f"/api/business-definitions/{r['definition_id']}"}
                 for r in self.db.query(
-                    "SELECT d.definition_id, d.name FROM business_definitions d JOIN definition_links l"
+                    "SELECT DISTINCT d.definition_id, d.name FROM business_definitions d JOIN definition_links l"
                     " ON l.definition_id = d.definition_id WHERE d.active = 1 AND l.target_type = 'term'"
-                    " AND l.target_slug = ? ORDER BY d.name", (slug,))]
+                    f" AND l.target_slug IN ({','.join('?' * len(slugs))}) ORDER BY d.name", tuple(slugs))]
 
     def delete(self, definition_id: str) -> dict[str, Any]:
         self.get(definition_id)
