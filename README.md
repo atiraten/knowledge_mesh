@@ -1,6 +1,6 @@
 # Knowledge Mesh
 
-Knowledge Mesh is a "chat-with-data assistant" Proof of Concept (PoC) for answering natural-language questions using unstructured information (documents) and structured data. It indexes files and websites, catalogs relational databases, Parquet files, and Databricks sources, and builds an RDF knowledge graph that connects business terms, datasets, columns, and relationships. The search agent can retrieve document passages, traverse the graph, and run read-only SQL against supported database sources to assemble an answer with supporting evidence.
+Knowledge Mesh is a "chat-with-data assistant" Proof of Concept (PoC) for answering natural-language questions using unstructured information (documents) and structured data. It indexes files and websites, catalogs relational databases, Parquet files, and Databricks delta sources, and builds an RDF knowledge graph that connects business terms, datasets, columns, and relationships. The search agent can retrieve document passages, traverse the graph, and run read-only SQL against supported database sources to assemble an answer with supporting evidence.
 
 
 **Knowledge Mesh extracts database metadata while leaving the underlying data in place. No Data movement**
@@ -484,7 +484,7 @@ Ontology example (Turtle, from the published graph):
 ```
 
 **`execute_sql`** (MCP + agent; `structured/sql_exec.py`). Input: `source_id` (a cataloged database or
-Databricks source), `sql`, optional `max_rows`. sqlglot parses the query in the source's dialect: exactly
+Databricks delta source), `sql`, optional `max_rows`. sqlglot parses the query in the source's dialect: exactly
 one SELECT / WITH … SELECT, no SELECT INTO or locking clause, every table a cataloged dataset of that source
 and inside the search scope. It then runs on the connector's read-only session with a statement timeout
 where the dialect has one. Output: `{status: "ok", columns: [{name, type, sensitive, sensitive_terms}], rows,
